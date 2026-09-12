@@ -140,6 +140,9 @@ class ZoomablePdfView(QPdfView):
         # margin guides (left, top, right, bottom) in PDF points
         self._margin_guides: tuple[float, float, float, float] | None = None
         self._mirror_guides = False
+        # punch-hole guide distance from the binding edge, in points;
+        # a screen-only overlay, never part of the printed output
+        self._hole_guide_pt: float | None = None
 
     # ---------- margin guides ----------
 
@@ -156,6 +159,10 @@ class ZoomablePdfView(QPdfView):
             guides = None
         self._margin_guides = guides
         self._mirror_guides = mirror
+        self.viewport().update()
+
+    def set_hole_guide(self, distance_pt: float | None) -> None:
+        self._hole_guide_pt = distance_pt
         self.viewport().update()
 
     def _page_scale(self) -> float:
@@ -200,30 +207,36 @@ class ZoomablePdfView(QPdfView):
 
     def paintEvent(self, event):  # noqa: N802 (Qt naming)
         super().paintEvent(event)
-        if self._margin_guides is None:
+        if self._margin_guides is None and self._hole_guide_pt is None:
             return
-        left, top, right, bottom = self._margin_guides
         scale = self._page_scale()
         painter = QPainter(self.viewport())
-        pen = QPen(QColor(220, 60, 60, 170))
-        pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(pen)
+        margin_pen = QPen(QColor(220, 60, 60, 170))
+        margin_pen.setStyle(Qt.PenStyle.DashLine)
+        hole_pen = QPen(QColor(60, 60, 220, 170))
+        hole_pen.setStyle(Qt.PenStyle.DashLine)
         viewport_rect = QRectF(self.viewport().rect())
         for index, rect in enumerate(self._page_rects()):
             if not rect.intersects(viewport_rect):
                 continue
-            if self._mirror_guides and index % 2 == 1:  # even page number
-                page_left, page_right = right, left
-            else:
-                page_left, page_right = left, right
-            painter.drawRect(
-                rect.adjusted(
-                    page_left * scale,
-                    top * scale,
-                    -page_right * scale,
-                    -bottom * scale,
+            even = self._mirror_guides and index % 2 == 1  # even page number
+            if self._margin_guides is not None:
+                left, top, right, bottom = self._margin_guides
+                if even:
+                    left, right = right, left
+                painter.setPen(margin_pen)
+                painter.drawRect(
+                    rect.adjusted(
+                        left * scale, top * scale, -right * scale, -bottom * scale
+                    )
                 )
-            )
+            if self._hole_guide_pt is not None:
+                offset = self._hole_guide_pt * scale
+                x = rect.right() - offset if even else rect.left() + offset
+                painter.setPen(hole_pen)
+                painter.drawLine(
+                    round(x), round(rect.top()), round(x), round(rect.bottom())
+                )
 
     # ---------- zoom ----------
 
@@ -725,9 +738,9 @@ class MainWindow(QMainWindow):
         margins_form.addRow("", self.mirror_check)
         self.hole_check = QCheckBox("Punch hole guide (18 mm)")
         self.hole_check.setToolTip(
-            "Prints a dashed line 18 mm from the binding edge as a "
-            "guide for punching holes; alternates sides when margins "
-            "are mirrored"
+            "Shows a dashed line 18 mm from the binding edge in the "
+            "preview as a hole-punching reference; alternates sides "
+            "when margins are mirrored. Not printed."
         )
         margins_form.addRow("", self.hole_check)
         side_layout.addWidget(margins_group)
@@ -918,8 +931,11 @@ class MainWindow(QMainWindow):
             ),
             mirror=job.mirror_margins,
         )
+        self.viewer.set_hole_guide(
+            printing.HOLE_GUIDE_MM * printing.MM_TO_PT if job.hole_guide else None
+        )
         options = printing.preview_job_options(job)
-        has_margins = printing.needs_gs_pass(job)
+        has_margins = printing.margins_active(job)
         if not options and not has_margins:
             if self._showing_transformed:
                 self._load_preserving_view(self.current_path)

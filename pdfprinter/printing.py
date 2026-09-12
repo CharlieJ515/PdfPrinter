@@ -42,7 +42,8 @@ class PrintJob:
     margin_bottom: float = 0.0
     # swap left/right margins on even pages (binding edge for duplex)
     mirror_margins: bool = False
-    # print a dashed line 18 mm from the binding edge as a punch guide
+    # show a punch guide 18 mm from the binding edge in the PREVIEW
+    # only — it is never part of the printed output
     hole_guide: bool = False
     # printer-specific PPD choices, e.g. {"BRResolution": "Fine"}
     extra_options: dict[str, str] = field(default_factory=dict)
@@ -232,8 +233,6 @@ def margins_active(job: PrintJob) -> bool:
     )
 
 
-def needs_gs_pass(job: PrintJob) -> bool:
-    return margins_active(job) or job.hole_guide
 
 
 def _margin_ps(job: PrintJob) -> str:
@@ -264,25 +263,6 @@ def _margin_ps(job: PrintJob) -> str:
     )
 
 
-def _hole_guide_ps(job: PrintJob) -> str:
-    """EndPage hook: stamp a dashed punch guide at the binding edge.
-
-    pdfwrite drops marks made in BeginPage, so the line is stamped in
-    EndPage (the watermark technique). Run as its own pass so the
-    margin transform can't displace it.
-    """
-    mirror = "true" if job.mirror_margins else "false"
-    return (
-        f"/MIRROR {mirror} def /HG {HOLE_GUIDE_MM * MM_TO_PT:.2f} def "
-        "<< /EndPage { exch 1 add /PN exch def 2 ne dup { "
-        "gsave newpath 0.6 setgray 0.75 setlinewidth [4 4] 0 setdash "
-        "currentpagedevice /PageSize get aload pop /PH exch def /PW exch def "
-        "MIRROR PN 2 mod 0 eq and { PW HG sub } { HG } ifelse "
-        "dup 0 moveto PH lineto stroke grestore "
-        "} if } >> setpagedevice"
-    )
-
-
 def _run_gs(src: str, dest: str, postscript: str) -> None:
     cmd = [
         "gs", "-q", "-dBATCH", "-dNOPAUSE", "-dSAFER",
@@ -298,33 +278,18 @@ def _run_gs(src: str, dest: str, postscript: str) -> None:
 
 
 def apply_margins(src: str, dest: str, job: PrintJob) -> None:
-    """Apply margins and/or the punch guide by rewriting the PDF.
+    """Apply margins by rewriting the PDF with Ghostscript.
 
     CUPS's pdftopdf ignores the page-left/right/top/bottom options, so
-    Ghostscript does the work: one pass scales and centers each page
-    inside the margin box (mirrored on even pages if requested), and a
-    separate pass stamps the punch guide line. The same file is used
-    for printing and previewing, so both always match.
+    Ghostscript does the work: it scales and centers each page inside
+    the margin box (mirrored on even pages if requested). The same file
+    is used for printing and previewing, so both always match.
     """
     if shutil.which("gs") is None:
         raise PrintError("Ghostscript (gs) is required for margins")
-    passes = []
-    if margins_active(job):
-        passes.append(_margin_ps(job))
-    if job.hole_guide:
-        passes.append(_hole_guide_ps(job))
-    if not passes:
-        raise PrintError("No margin or guide options set")
-    with tempfile.TemporaryDirectory(prefix="pdfprinter-gs-") as tmpdir:
-        work = src
-        for index, postscript in enumerate(passes):
-            out = (
-                dest
-                if index == len(passes) - 1
-                else os.path.join(tmpdir, f"pass{index}.pdf")
-            )
-            _run_gs(work, out, postscript)
-            work = out
+    if not margins_active(job):
+        raise PrintError("No margins set")
+    _run_gs(src, dest, _margin_ps(job))
 
 
 def preview_job_options(job: PrintJob) -> str:
@@ -412,7 +377,7 @@ def print_file(path: str, job: PrintJob) -> str:
                 # no local pdftopdf: fall back to server-side options
                 for option in options:
                     cmd += ["-o", option]
-            if needs_gs_pass(job):
+            if margins_active(job):
                 margined = os.path.join(tmpdir, "margined.pdf")
                 apply_margins(work, margined, job)
                 work = margined
