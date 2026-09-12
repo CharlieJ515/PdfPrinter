@@ -24,6 +24,8 @@ from PyQt6.QtPdfWidgets import QPdfView
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -32,6 +34,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPinchGesture,
@@ -43,7 +47,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import printing
+from . import printing, zotero
 
 DUPLEX_CHOICES = [
     ("One-sided", "one-sided"),
@@ -389,6 +393,58 @@ class ZoomablePdfView(QPdfView):
         self._glide_anim.start()
 
 
+class ZoteroDialog(QDialog):
+    """Searchable list of the PDFs in a Zotero library."""
+
+    def __init__(self, storage_dir: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Open from Zotero")
+        self.resize(640, 480)
+        self.selected_path: str | None = None
+        self._entries = zotero.list_pdfs(storage_dir)
+
+        layout = QVBoxLayout(self)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText(
+            f"Search {len(self._entries)} PDFs (most recent first)…"
+        )
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.filter_edit)
+
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _item: self.accept())
+        layout.addWidget(self.list)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Open
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._apply_filter("")
+        self.filter_edit.setFocus()
+
+    def _apply_filter(self, text: str) -> None:
+        tokens = text.lower().split()
+        self.list.clear()
+        for name, path in self._entries:
+            if all(token in name.lower() for token in tokens):
+                item = QListWidgetItem(name)
+                item.setData(Qt.ItemDataRole.UserRole, path)
+                item.setToolTip(path)
+                self.list.addItem(item)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def accept(self) -> None:  # noqa: A003 (Qt naming)
+        item = self.list.currentItem()
+        if item is not None:
+            self.selected_path = item.data(Qt.ItemDataRole.UserRole)
+        super().accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, pdf_path: str | None = None):
         super().__init__()
@@ -444,6 +500,12 @@ class MainWindow(QMainWindow):
         open_button = QPushButton("Open PDF…")
         open_button.clicked.connect(self.open_dialog)
         side_layout.addWidget(open_button)
+
+        self.zotero_storage = zotero.find_storage_dir()
+        if self.zotero_storage:
+            zotero_button = QPushButton("Open from Zotero…")
+            zotero_button.clicked.connect(self.open_zotero_dialog)
+            side_layout.addWidget(zotero_button)
 
         self.file_label = QLabel("No file loaded")
         self.file_label.setWordWrap(True)
@@ -655,6 +717,12 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_dialog)
         file_menu.addAction(open_action)
+
+        if self.zotero_storage:
+            zotero_action = QAction("Open from &Zotero…", self)
+            zotero_action.setShortcut("Ctrl+Shift+O")
+            zotero_action.triggered.connect(self.open_zotero_dialog)
+            file_menu.addAction(zotero_action)
 
         print_action = QAction("&Print", self)
         print_action.setShortcut(QKeySequence.StandardKey.Print)
@@ -998,6 +1066,11 @@ class MainWindow(QMainWindow):
                     combo.setCurrentIndex(index)
                     break
         combo.blockSignals(False)
+
+    def open_zotero_dialog(self) -> None:
+        dialog = ZoteroDialog(self.zotero_storage, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
+            self.load_pdf(dialog.selected_path)
 
     def open_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
