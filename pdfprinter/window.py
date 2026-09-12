@@ -13,6 +13,7 @@ from PyQt6.QtCore import (
     QEvent,
     QPoint,
     Qt,
+    QThread,
     QTimer,
     QVariantAnimation,
     pyqtSignal,
@@ -394,6 +395,22 @@ class ZoomablePdfView(QPdfView):
         self._glide_anim.start()
 
 
+class _TransformWorker(QThread):
+    """Runs the preview transform pipeline off the GUI thread."""
+
+    done = pyqtSignal(object, object)  # (result path | None, error | None)
+
+    def __init__(self, task, parent=None):
+        super().__init__(parent)
+        self._task = task
+
+    def run(self):  # noqa: A003 (Qt naming)
+        try:
+            self.done.emit(self._task(), None)
+        except printing.PrintError as exc:
+            self.done.emit(None, str(exc))
+
+
 class ZoteroDialog(QDialog):
     """Zotero-style picker: collections tree plus title/creator list."""
 
@@ -526,6 +543,8 @@ class MainWindow(QMainWindow):
         self._subset_dir: tempfile.TemporaryDirectory | None = None
         self._showing_transformed = False
         self._zotero_dialog: ZoteroDialog | None = None
+        self._preview_worker: _TransformWorker | None = None
+        self._preview_dirty = False
 
         self._build_ui()
         self._build_menu()
@@ -907,53 +926,75 @@ class MainWindow(QMainWindow):
                 self._showing_transformed = False
                 self.statusBar().showMessage("Preview: original document", 3000)
             return
+        if self._preview_worker is not None and self._preview_worker.isRunning():
+            # a transform is in flight: re-run with fresh options after it
+            self._preview_dirty = True
+            return
         if self._subset_dir is None:
             self._subset_dir = tempfile.TemporaryDirectory(prefix="pdfprinter-")
-        preview_path = os.path.join(self._subset_dir.name, "preview.pdf")
 
-        # same order as print_file: layout first, margins on the result
+        # snapshot everything the worker needs; it must not touch the UI
         source = self.current_path
-        if options and printing.pdftopdf_available():
-            try:
-                printing.transform_for_preview(source, options, preview_path)
-            except printing.PrintError as exc:
-                self.statusBar().showMessage(f"Preview failed: {exc}", 5000)
-                return
-            source = preview_path
+        subset_dir = self._subset_dir.name
 
-        if has_margins:
-            margined_path = os.path.join(self._subset_dir.name, "margined.pdf")
-            try:
-                printing.apply_margins(source, margined_path, job)
-            except printing.PrintError as exc:
-                self.statusBar().showMessage(f"Margin preview failed: {exc}", 5000)
-                return
-            source = margined_path
+        def task() -> str:
+            # same order as print_file: layout first, margins on the result
+            work = source
+            if options:
+                preview_path = os.path.join(subset_dir, "preview.pdf")
+                if printing.pdftopdf_available():
+                    printing.transform_for_preview(work, options, preview_path)
+                    work = preview_path
+                elif (
+                    job.page_range
+                    and printing.validate_page_range(job.page_range)
+                    and shutil.which("qpdf")
+                ):
+                    # fallback: at least preview the page selection
+                    printing.make_page_subset(work, job.page_range, preview_path)
+                    work = preview_path
+            if has_margins:
+                margined_path = os.path.join(subset_dir, "margined.pdf")
+                printing.apply_margins(work, margined_path, job)
+                work = margined_path
+            return work
 
-        if source != self.current_path:
-            self._load_preserving_view(source)
-            self._showing_transformed = True
-            label = options if options else "margins"
-            self.statusBar().showMessage(f"Preview: as printed ({label})", 5000)
-            return
-
-        # fallback: at least preview the page selection with qpdf
-        text = self.range_edit.text().strip()
-        if not text or not printing.validate_page_range(text):
-            return
-        if shutil.which("qpdf") is None:
-            self.statusBar().showMessage(
-                "pdftopdf/qpdf not available — preview shows the original", 5000
+        self.statusBar().showMessage("Rendering preview…")
+        worker = _TransformWorker(task, self)
+        worker.done.connect(
+            lambda result, error: self._on_preview_done(
+                worker, source, options, result, error
             )
+        )
+        self._preview_worker = worker
+        worker.start()
+
+    def _on_preview_done(
+        self,
+        worker: _TransformWorker,
+        source: str,
+        options: str,
+        result: str | None,
+        error: str | None,
+    ) -> None:
+        if self._preview_worker is worker:
+            self._preview_worker = None
+        worker.deleteLater()
+        if self._preview_dirty:
+            # options changed while rendering: redo with the fresh state
+            self._preview_dirty = False
+            self._apply_layout_preview()
             return
-        try:
-            printing.make_page_subset(self.current_path, text, preview_path)
-        except printing.PrintError as exc:
-            self.statusBar().showMessage(f"Page preview failed: {exc}", 5000)
+        if error is not None:
+            self.statusBar().showMessage(f"Preview failed: {error}", 5000)
             return
-        self._load_preserving_view(preview_path)
+        if result == source:
+            self.statusBar().clearMessage()
+            return
+        self._load_preserving_view(result)
         self._showing_transformed = True
-        self.statusBar().showMessage(f"Preview: pages {text}", 3000)
+        label = options if options else "margins"
+        self.statusBar().showMessage(f"Preview: as printed ({label})", 5000)
 
     # ---------- actions ----------
 
@@ -1266,6 +1307,12 @@ class MainWindow(QMainWindow):
         printing.save_last_job(job)
         self.last_button.setEnabled(True)
         self.statusBar().showMessage(f"Sent to printer: {job_id}", 10000)
+
+    def closeEvent(self, event):  # noqa: N802 (Qt naming)
+        # let a running transform finish; destroying its thread aborts
+        if self._preview_worker is not None and self._preview_worker.isRunning():
+            self._preview_worker.wait(5000)
+        super().closeEvent(event)
 
     # ---------- drag & drop ----------
 
