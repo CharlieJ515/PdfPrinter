@@ -525,6 +525,7 @@ class MainWindow(QMainWindow):
         self.current_path: str | None = None
         self._subset_dir: tempfile.TemporaryDirectory | None = None
         self._showing_transformed = False
+        self._zotero_dialog: ZoteroDialog | None = None
 
         self._build_ui()
         self._build_menu()
@@ -1137,7 +1138,11 @@ class MainWindow(QMainWindow):
         combo.blockSignals(False)
 
     def open_zotero_dialog(self) -> None:
-        dialog = ZoteroDialog(self.zotero_storage, self)
+        # reuse the dialog so the picked collection, search text and
+        # scroll position are right where the user left them
+        if self._zotero_dialog is None:
+            self._zotero_dialog = ZoteroDialog(self.zotero_storage, self)
+        dialog = self._zotero_dialog
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
             self.load_pdf(dialog.selected_path)
 
