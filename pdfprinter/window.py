@@ -44,13 +44,15 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from . import printing, zotero
+from . import __version__, printing, zotero
+from .help import HELP_HTML
 
 DUPLEX_CHOICES = [
     ("One-sided", "one-sided"),
@@ -635,10 +637,14 @@ class MainWindow(QMainWindow):
         form.addRow("", refresh_button)
 
         self.copies_spin = QSpinBox()
+        self.copies_spin.setToolTip("Number of copies to print")
         self.copies_spin.setRange(1, 999)
         form.addRow("Copies", self.copies_spin)
 
         self.range_edit = QLineEdit()
+        self.range_edit.setToolTip(
+            "Pages to print, e.g. 1-4,7 — the preview shows the selection"
+        )
         self.range_edit.setPlaceholderText("All pages (e.g. 1-4,7)")
         form.addRow("Pages", self.range_edit)
 
@@ -648,6 +654,9 @@ class MainWindow(QMainWindow):
         form.addRow("Duplex", self.duplex_combo)
 
         self.color_combo = QComboBox()
+        self.color_combo.setToolTip(
+            "Color or grayscale output; grayscale is previewed too"
+        )
         for label, value in COLOR_CHOICES:
             self.color_combo.addItem(label, value)
         self.color_combo.currentIndexChanged.connect(self._apply_color_preview)
@@ -671,16 +680,21 @@ class MainWindow(QMainWindow):
         form.addRow("Paper", self.media_combo)
 
         self.orientation_combo = QComboBox()
+        self.orientation_combo.setToolTip("Rotate the layout to landscape")
         for label, value in ORIENTATION_CHOICES:
             self.orientation_combo.addItem(label, value)
         form.addRow("Orientation", self.orientation_combo)
 
         self.nup_combo = QComboBox()
+        self.nup_combo.setToolTip("Print several pages on each sheet")
         for label, value in NUP_CHOICES:
             self.nup_combo.addItem(label, value)
         form.addRow("Pages/sheet", self.nup_combo)
 
         self.nup_layout_combo = QComboBox()
+        self.nup_layout_combo.setToolTip(
+            "Order in which pages fill the sheet (pages/sheet > 1)"
+        )
         for label, value in NUP_LAYOUT_CHOICES:
             self.nup_layout_combo.addItem(label, value)
         self.nup_layout_combo.setEnabled(False)
@@ -700,6 +714,10 @@ class MainWindow(QMainWindow):
         form.addRow("Media type", self.mediatype_combo)
 
         self.scaling_combo = QComboBox()
+        self.scaling_combo.setToolTip(
+            "How content is scaled to the paper; Custom enables the\n"
+            "percentage below"
+        )
         for label, value in SCALING_CHOICES:
             self.scaling_combo.addItem(label, value)
         form.addRow("Scaling", self.scaling_combo)
@@ -721,11 +739,18 @@ class MainWindow(QMainWindow):
         form.addRow("Scale", self.scale_spin)
 
         self.pageset_combo = QComboBox()
+        self.pageset_combo.setToolTip(
+            "Print only odd or even pages — for manual double-sided\n"
+            "printing: print odd, re-feed the stack, print even"
+        )
         for label, value in PAGE_SET_CHOICES:
             self.pageset_combo.addItem(label, value)
         form.addRow("Page set", self.pageset_combo)
 
         self.collate_check = QCheckBox("Collate copies")
+        self.collate_check.setToolTip(
+            "Print complete sets (1,2,3 / 1,2,3) instead of page groups"
+        )
         self.collate_check.setEnabled(False)  # only meaningful for copies > 1
         self.copies_spin.valueChanged.connect(
             lambda v: self.collate_check.setEnabled(v > 1)
@@ -733,6 +758,7 @@ class MainWindow(QMainWindow):
         form.addRow("", self.collate_check)
 
         self.reverse_check = QCheckBox("Reverse order")
+        self.reverse_check.setToolTip("Print the last page first")
         form.addRow("", self.reverse_check)
 
         side_layout.addWidget(self.more_group)
@@ -911,6 +937,42 @@ class MainWindow(QMainWindow):
         fit_action.setShortcut("Ctrl+0")
         fit_action.triggered.connect(self.fit_width)
         view_menu.addAction(fit_action)
+
+        help_menu = self.menuBar().addMenu("&Help")
+
+        guide_action = QAction("&User Guide", self)
+        guide_action.setShortcut(QKeySequence.StandardKey.HelpContents)
+        guide_action.triggered.connect(self.show_help)
+        help_menu.addAction(guide_action)
+
+        about_action = QAction("&About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def show_help(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("User Guide")
+        dialog.resize(620, 640)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(HELP_HTML)
+        layout.addWidget(browser)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About PDF Printer",
+            f"<b>PDF Printer</b> {__version__}<br>"
+            "Prints PDFs via CUPS with a true print preview.<br><br>"
+            '<a href="https://github.com/CharlieJ515/PdfPrinter">'
+            "github.com/CharlieJ515/PdfPrinter</a><br>MIT license",
+        )
 
     # ---------- zoom ----------
 
