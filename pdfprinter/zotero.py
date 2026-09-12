@@ -144,9 +144,11 @@ def _build_library(storage_dir, collections, attachments, titles, creator_rows, 
             creator = f"{names[0]} et al."
         else:
             creator = " & ".join(n for n in names if n)
+        # Zotero titles may carry HTML markup like <i>…</i>
+        title = re.sub(r"<[^>]+>", "", titles.get(owner) or file_name)
         items.append(
             ZoteroItem(
-                title=titles.get(owner) or file_name,
+                title=title,
                 creators=creator,
                 path=path,
                 mtime=os.path.getmtime(path),
