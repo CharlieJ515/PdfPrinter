@@ -89,6 +89,7 @@ SCALING_CHOICES = [
     ("Fit to page", "fit"),
     ("Fill page", "fill"),
     ("No scaling", "none"),
+    ("Custom", "custom"),
 ]
 
 ZOOM_STEP = 1.25
@@ -700,9 +701,15 @@ class MainWindow(QMainWindow):
         self.scale_spin.setRange(25, 400)
         self.scale_spin.setSuffix(" %")
         self.scale_spin.setValue(100)
+        self.scale_spin.setEnabled(False)  # only with Scaling = Custom
         self.scale_spin.setToolTip(
-            "Manual content scale, centered on the page (and inside "
-            "the margins when set)"
+            "Content scale for Scaling = Custom, centered on the page "
+            "(and inside the margins when set)"
+        )
+        self.scaling_combo.currentIndexChanged.connect(
+            lambda: self.scale_spin.setEnabled(
+                self.scaling_combo.currentData() == "custom"
+            )
         )
         form.addRow("Scale", self.scale_spin)
 
@@ -1073,7 +1080,6 @@ class MainWindow(QMainWindow):
                 and "(default)" not in combo.currentText()
             )
         count += bool(self.scaling_combo.currentData())
-        count += self.scale_spin.value() != 100
         count += bool(self.pageset_combo.currentData())
         count += self.collate_check.isEnabled() and self.collate_check.isChecked()
         count += self.reverse_check.isChecked()
@@ -1269,8 +1275,17 @@ class MainWindow(QMainWindow):
             collate=self.collate_check.isChecked(),
             page_set=self.pageset_combo.currentData(),
             reverse=self.reverse_check.isChecked(),
-            scaling=self.scaling_combo.currentData(),
-            scale_percent=self.scale_spin.value(),
+            # "Custom" means our gs scale; no print-scaling option is sent
+            scaling=(
+                ""
+                if self.scaling_combo.currentData() == "custom"
+                else self.scaling_combo.currentData()
+            ),
+            scale_percent=(
+                self.scale_spin.value()
+                if self.scaling_combo.currentData() == "custom"
+                else 100
+            ),
             margin_left=self.margin_spins["left"].value(),
             margin_right=self.margin_spins["right"].value(),
             margin_top=self.margin_spins["top"].value(),
@@ -1323,8 +1338,12 @@ class MainWindow(QMainWindow):
         pick(self.orientation_combo, job.landscape)
         pick(self.nup_combo, job.number_up)
         pick(self.nup_layout_combo, job.number_up_layout)
-        pick(self.scaling_combo, job.scaling)
-        self.scale_spin.setValue(job.scale_percent)
+        if job.scale_percent != 100:
+            pick(self.scaling_combo, "custom")
+            self.scale_spin.setValue(job.scale_percent)
+        else:
+            pick(self.scaling_combo, job.scaling)
+            self.scale_spin.setValue(100)
         pick(self.pageset_combo, job.page_set)
         self.collate_check.setChecked(job.collate)
         self.reverse_check.setChecked(job.reverse)
