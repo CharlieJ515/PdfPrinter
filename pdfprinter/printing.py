@@ -272,9 +272,12 @@ def _margin_ps(job: PrintJob) -> str:
 
 
 def _run_gs(src: str, dest: str, postscript: str) -> None:
+    # PDF 1.4 flattens transparency and normalizes constructs that some
+    # printer filters (e.g. Canon UFR II, error #853) cannot process
     cmd = [
         "gs", "-q", "-dBATCH", "-dNOPAUSE", "-dSAFER",
-        "-sDEVICE=pdfwrite", "-o", dest, "-c", postscript, "-f", src,
+        "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.4",
+        "-o", dest, "-c", postscript, "-f", src,
     ]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -502,6 +505,14 @@ def print_file(path: str, job: PrintJob) -> str:
             # pages 2-5, output page 1 (source page 2) gets the left
             # margin. lp spools a copy, so the temp files can go after.
             work = path
+            # sanitize first: structurally defective PDFs make printer
+            # filter chains fail on the device (e.g. Canon error #853);
+            # the rewrite is appearance-neutral and cached per document
+            if shutil.which("gs") is not None:
+                try:
+                    work = _repaired_copy(work)
+                except PrintError:
+                    pass  # print the original rather than not at all
             options = layout_options(job)
             if options and pdftopdf_available():
                 layout_path = os.path.join(tmpdir, "layout.pdf")
