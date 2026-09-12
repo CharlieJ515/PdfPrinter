@@ -324,10 +324,15 @@ def _margin_ps(job: PrintJob) -> str:
 def _run_gs(src: str, dest: str, postscript: str) -> None:
     # NOTE: do not add -dCompatibilityLevel=1.4 here — its output makes
     # CUPS's pdftopdf fail ("missing required flags"), which reaches the
-    # printer as broken data (Canon error #853)
+    # printer as broken data (Canon error #853).
+    # -dPreserveAnnots=false: broken Link annotations (no appearance
+    # stream) make server-side pdftopdf corrupt the images on their
+    # pages — figures silently vanish from the printout. Annotations
+    # are not printable content, so drop them for print files.
     cmd = [
         "gs", "-q", "-dBATCH", "-dNOPAUSE", "-dSAFER",
-        "-sDEVICE=pdfwrite", "-o", dest, "-c", postscript, "-f", src,
+        "-sDEVICE=pdfwrite", "-dPreserveAnnots=false",
+        "-o", dest, "-c", postscript, "-f", src,
     ]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
