@@ -9,20 +9,17 @@ license=('MIT')
 depends=('python' 'python-pyqt6' 'python-pikepdf' 'cups' 'ghostscript')
 optdepends=('qpdf: page-range preview fallback when cups pdftopdf is unavailable')
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
-# For local development builds; replace with a tarball/git source when
-# publishing to the AUR, e.g.:
-#   source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-source=()
-sha256sums=()
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('c7e81997d2c63eefd7167c9d428d09e4279d78c17c938c375b8f610e5418a3f8')
 
 build() {
-  cd "$startdir"
-  python -m build --wheel --no-isolation --outdir "$srcdir/dist"
+  cd "PdfPrinter-$pkgver"
+  python -m build --wheel --no-isolation
 }
 
 package() {
-  cd "$startdir"
-  python -m installer --destdir="$pkgdir" "$srcdir"/dist/*.whl
+  cd "PdfPrinter-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
   install -Dm644 data/pdfprinter.desktop \
     "$pkgdir/usr/share/applications/pdfprinter.desktop"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
