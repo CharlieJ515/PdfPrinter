@@ -47,9 +47,11 @@ class PrintJob:
     hole_guide: bool = False
     # manual content scale; 100 = original size
     scale_percent: int = 100
-    # margins shift the content at original size instead of shrinking
-    # it to fit — the opposite edge may clip
-    margin_shift: bool = False
+    # how margins place the content:
+    #   fit   — shrink into the margin box (nothing clips)
+    #   shift — translate at original size (opposite edge may clip)
+    #   hole  — center the ink between the punch line and the far edge
+    margin_mode: str = "fit"
     # printer-specific PPD choices, e.g. {"BRResolution": "Fine"}
     extra_options: dict[str, str] = field(default_factory=dict)
 
@@ -239,7 +241,42 @@ def margins_active(job: PrintJob) -> bool:
 
 
 def needs_gs_pass(job: PrintJob) -> bool:
-    return margins_active(job) or job.scale_percent != 100
+    return (
+        margins_active(job)
+        or job.scale_percent != 100
+        or job.margin_mode == "hole"
+    )
+
+
+_bbox_cache: dict[tuple[str, float], list[tuple[float, float, float, float]]] = {}
+
+
+def ink_boxes(src: str) -> list[tuple[float, float, float, float]]:
+    """Per-page ink bounding boxes (x0, y0, x1, y1) via gs's bbox device."""
+    key = (src, os.path.getmtime(src))
+    cached = _bbox_cache.get(key)
+    if cached is not None:
+        return cached
+    if shutil.which("gs") is None:
+        raise PrintError("Ghostscript (gs) is required to measure content")
+    cmd = ["gs", "-q", "-dBATCH", "-dNOPAUSE", "-dSAFER",
+           "-sDEVICE=bbox", "-o", os.devnull, "-f", src]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PrintError(f"Failed to measure content: {exc}") from exc
+    boxes = []
+    for line in out.stderr.splitlines():
+        if line.startswith("%%HiResBoundingBox:"):
+            try:
+                x0, y0, x1, y1 = (float(v) for v in line.split()[1:5])
+            except ValueError:
+                continue
+            boxes.append((x0, y0, x1, y1))
+    if not boxes:
+        raise PrintError("Could not measure the content's bounding boxes")
+    _bbox_cache[key] = boxes
+    return boxes
 
 
 
@@ -255,7 +292,7 @@ def _margin_ps(job: PrintJob) -> str:
         f"/MLbase {left:.2f} def /MRbase {right:.2f} def "
         f"/MT {top:.2f} def /MB {bottom:.2f} def "
         f"/MIRROR {mirror} def /USC {job.scale_percent / 100:.4f} def "
-        f"/SHIFT {'true' if job.margin_shift else 'false'} def "
+        f"/SHIFT {'true' if job.margin_mode == 'shift' else 'false'} def "
         "<< /BeginPage { "
         # showpage count on the stack -> 1-based page number
         "1 add /PN exch def "
@@ -315,16 +352,43 @@ def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
     bottom = job.margin_bottom * MM_TO_PT
     user_scale = job.scale_percent / 100.0
 
+    inks = ink_boxes(src) if job.margin_mode == "hole" else []
+
     with pikepdf.open(src) as pdf:
         for index, page in enumerate(pdf.pages):
             box = [float(v) for v in page.mediabox]
             page_w, page_h = box[2] - box[0], box[3] - box[1]
             if page_w <= 0 or page_h <= 0:
                 continue
-            ml, mr = left, right
-            if job.mirror_margins and (index + 1) % 2 == 0:
-                ml, mr = mr, ml
-            if job.margin_shift:
+            mirrored = job.mirror_margins and (index + 1) % 2 == 0
+            ml, mr = (right, left) if mirrored else (left, right)
+            if job.margin_mode == "hole":
+                # center the ink between the punch line and the far edge
+                if index >= len(inks):
+                    continue
+                ink = inks[index]
+                hole = HOLE_GUIDE_MM * MM_TO_PT
+                zone_x0 = box[0] if mirrored else box[0] + hole
+                zone_x1 = box[2] - hole if mirrored else box[2]
+                ink_w = max(ink[2] - ink[0], 1.0)
+                scale = max(
+                    0.01, min(user_scale, (zone_x1 - zone_x0) / ink_w)
+                )
+                ink_cx = (ink[0] + ink[2]) / 2
+                ink_cy = (ink[1] + ink[3]) / 2
+                tx = (zone_x0 + zone_x1) / 2 - scale * ink_cx
+                ty = ink_cy * (1 - scale)  # keep the vertical center put
+                page.contents_add(
+                    pikepdf.Stream(
+                        pdf,
+                        f"q {scale:.5f} 0 0 {scale:.5f} "
+                        f"{tx:.3f} {ty:.3f} cm\n".encode(),
+                    ),
+                    prepend=True,
+                )
+                page.contents_add(pikepdf.Stream(pdf, b"\nQ"), prepend=False)
+                continue
+            if job.margin_mode == "shift":
                 # keep original size: translate only, may clip opposite edge
                 scale = max(0.01, user_scale)
                 tx = box[0] + (page_w - page_w * scale) / 2 + (ml - mr)
@@ -372,6 +436,8 @@ def apply_margins(src: str, dest: str, job: PrintJob) -> None:
             return
         except Exception:
             pass
+    if job.margin_mode == "hole":
+        raise PrintError("Punch-zone centering requires python-pikepdf")
     if shutil.which("gs") is None:
         raise PrintError(
             "python-pikepdf or Ghostscript (gs) is required for margins/scaling"

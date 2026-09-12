@@ -756,12 +756,23 @@ class MainWindow(QMainWindow):
             )
             self.margin_spins[key] = spin
             margins_form.addRow(label, spin)
-        self.shift_check = QCheckBox("Keep original size (shift)")
-        self.shift_check.setToolTip(
-            "Move the content instead of shrinking it to fit the "
-            "margins — it may get cut off at the opposite edge"
+        self.placement_combo = QComboBox()
+        self.placement_combo.addItem("Shrink to fit margins", "fit")
+        self.placement_combo.addItem("Shift by margins (may clip)", "shift")
+        self.placement_combo.addItem("Center right of punch line", "hole")
+        self.placement_combo.setToolTip(
+            "Fit: shrink content into the margins. Shift: move it at "
+            "original size. Punch line: center the measured content "
+            "between the 18 mm hole line and the far edge (margins "
+            "above are ignored)"
         )
-        margins_form.addRow("", self.shift_check)
+        self.placement_combo.currentIndexChanged.connect(
+            lambda: [
+                spin.setEnabled(self.placement_combo.currentData() != "hole")
+                for spin in self.margin_spins.values()
+            ]
+        )
+        margins_form.addRow("Placement", self.placement_combo)
         self.mirror_check = QCheckBox("Mirror margins (binding)")
         self.mirror_check.setToolTip(
             "For double-sided printing into a binder: even pages get the "
@@ -829,7 +840,7 @@ class MainWindow(QMainWindow):
         self.reverse_check.toggled.connect(self._preview_timer.start)
         for spin in self.margin_spins.values():
             spin.valueChanged.connect(self._preview_timer.start)
-        self.shift_check.toggled.connect(self._preview_timer.start)
+        self.placement_combo.currentIndexChanged.connect(self._preview_timer.start)
         self.mirror_check.toggled.connect(self._preview_timer.start)
         self.hole_check.toggled.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._preview_timer.start)
@@ -964,8 +975,11 @@ class MainWindow(QMainWindow):
         job = self._current_job()
         # margins are applied after all other transforms, so guide sides
         # follow the displayed page order and parity is always right
+        hole_mode = job.margin_mode == "hole"
         self.viewer.set_margin_guides(
-            (
+            None
+            if hole_mode  # margins are ignored in punch-zone placement
+            else (
                 job.margin_left * printing.MM_TO_PT,
                 job.margin_top * printing.MM_TO_PT,
                 job.margin_right * printing.MM_TO_PT,
@@ -974,7 +988,9 @@ class MainWindow(QMainWindow):
             mirror=job.mirror_margins,
         )
         self.viewer.set_hole_guide(
-            printing.HOLE_GUIDE_MM * printing.MM_TO_PT if job.hole_guide else None
+            printing.HOLE_GUIDE_MM * printing.MM_TO_PT
+            if job.hole_guide or hole_mode
+            else None
         )
         options = printing.preview_job_options(job)
         has_margins = printing.needs_gs_pass(job)
@@ -1307,7 +1323,7 @@ class MainWindow(QMainWindow):
             margin_top=self.margin_spins["top"].value(),
             margin_bottom=self.margin_spins["bottom"].value(),
             mirror_margins=self.mirror_check.isChecked(),
-            margin_shift=self.shift_check.isChecked(),
+            margin_mode=self.placement_combo.currentData(),
             hole_guide=self.hole_check.isChecked(),
             extra_options=extra_options,
         )
@@ -1375,7 +1391,7 @@ class MainWindow(QMainWindow):
         self.margin_spins["top"].setValue(round(job.margin_top))
         self.margin_spins["bottom"].setValue(round(job.margin_bottom))
         self.mirror_check.setChecked(job.mirror_margins)
-        self.shift_check.setChecked(job.margin_shift)
+        pick(self.placement_combo, job.margin_mode)
         self.hole_check.setChecked(job.hole_guide)
         self._preview_timer.start()
 
