@@ -455,6 +455,31 @@ def make_page_subset(src: str, page_range: str, dest: str) -> None:
         raise PrintError(out.stderr.strip() or "qpdf failed")
 
 
+def job_state(job_id: str) -> str:
+    """Where a submitted job is now: 'queued', 'completed' or 'gone'.
+
+    'gone' means CUPS no longer lists it as queued or completed —
+    typically canceled or aborted.
+    """
+    try:
+        queued = subprocess.run(
+            ["lpstat", "-o"], capture_output=True, text=True, timeout=10
+        )
+        if job_id in queued.stdout:
+            return "queued"
+        completed = subprocess.run(
+            ["lpstat", "-W", "completed", "-o"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if job_id in completed.stdout:
+            return "completed"
+    except (OSError, subprocess.TimeoutExpired):
+        return "queued"  # cannot tell; keep watching
+    return "gone"
+
+
 def print_file(path: str, job: PrintJob) -> str:
     """Submit a file to CUPS. Returns the CUPS job id string."""
     if not job.printer:

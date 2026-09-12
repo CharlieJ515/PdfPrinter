@@ -563,6 +563,12 @@ class MainWindow(QMainWindow):
         self._zotero_dialog: ZoteroDialog | None = None
         self._preview_worker: _TransformWorker | None = None
         self._preview_dirty = False
+        self._print_worker: _TransformWorker | None = None
+        self._tracked_job: str | None = None
+        self._track_polls = 0
+        self._job_timer = QTimer(self)
+        self._job_timer.setInterval(2000)
+        self._job_timer.timeout.connect(self._poll_job)
 
         self._build_ui()
         self._build_menu()
@@ -1376,19 +1382,77 @@ class MainWindow(QMainWindow):
             )
             return
         job = self._current_job()
-        try:
-            job_id = printing.print_file(self.current_path, job)
-        except printing.PrintError as exc:
-            QMessageBox.critical(self, "Print failed", str(exc))
+        path = self.current_path
+        self.print_button.setEnabled(False)
+        self.print_button.setText("Preparing job…")
+        self.statusBar().showMessage("Preparing print job…")
+        worker = _TransformWorker(lambda: printing.print_file(path, job), self)
+        worker.done.connect(
+            lambda job_id, error: self._on_print_done(worker, job, job_id, error)
+        )
+        self._print_worker = worker
+        worker.start()
+
+    def _on_print_done(
+        self,
+        worker: _TransformWorker,
+        job: printing.PrintJob,
+        job_id: str | None,
+        error: str | None,
+    ) -> None:
+        worker.deleteLater()
+        self._print_worker = None
+        self.print_button.setEnabled(True)
+        if error is not None:
+            self.print_button.setText("Print")
+            self.statusBar().showMessage(f"Print failed: {error}")
+            QMessageBox.critical(self, "Print failed", error)
             return
         printing.save_last_job(job)
         self.last_button.setEnabled(True)
-        self.statusBar().showMessage(f"Sent to printer: {job_id}", 10000)
+        self.print_button.setText("✓ Submitted")
+        QTimer.singleShot(4000, lambda: self.print_button.setText("Print"))
+        self.statusBar().showMessage(f"Job {job_id} submitted to the printer")
+        self._track_job(job_id)
+
+    # ---------- job tracking ----------
+
+    def _track_job(self, job_id: str) -> None:
+        self._tracked_job = job_id
+        self._track_polls = 0
+        self._job_timer.start()
+
+    def _poll_job(self) -> None:
+        job_id = self._tracked_job
+        if job_id is None:
+            self._job_timer.stop()
+            return
+        self._track_polls += 1
+        state = printing.job_state(job_id)
+        if state == "queued":
+            if self._track_polls > 150:  # ~5 minutes; stop nagging
+                self._job_timer.stop()
+                self.statusBar().showMessage(
+                    f"Job {job_id} is still queued (check the printer)"
+                )
+            else:
+                self.statusBar().showMessage(f"Job {job_id}: printing…")
+            return
+        self._job_timer.stop()
+        self._tracked_job = None
+        if state == "completed":
+            self.statusBar().showMessage(f"Job {job_id} completed ✓", 30000)
+        else:
+            self.statusBar().showMessage(
+                f"Job {job_id} disappeared from the queue — it may have "
+                "been canceled or aborted"
+            )
 
     def closeEvent(self, event):  # noqa: N802 (Qt naming)
-        # let a running transform finish; destroying its thread aborts
-        if self._preview_worker is not None and self._preview_worker.isRunning():
-            self._preview_worker.wait(5000)
+        # let running workers finish; destroying a live thread aborts
+        for worker in (self._preview_worker, self._print_worker):
+            if worker is not None and worker.isRunning():
+                worker.wait(10000)
         super().closeEvent(event)
 
     # ---------- drag & drop ----------
