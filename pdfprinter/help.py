@@ -25,7 +25,9 @@ machine are listed. The picker remembers where you left off.</li>
 Zoom anchors on the cursor or pinch center.</li>
 <li>Scrolling has touchpad inertia; mouse wheel steps are animated.</li>
 <li>Red dashed lines mark the margins; the blue dashed line is the
-punch-hole guide. Both are screen-only — never printed.</li>
+punch-hole guide; gray strips at the page edges are the printer's own
+unprintable border (nothing prints there). All screen-only — never
+printed.</li>
 <li>Changing any layout option re-renders the preview in the
 background (status bar shows <i>Rendering preview…</i>).</li>
 </ul>

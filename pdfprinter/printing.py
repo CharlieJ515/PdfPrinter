@@ -54,6 +54,9 @@ class PrintJob:
     #               edge, shrinking only if it is wider than the zone
     #   hole-clip — same centering, never shrinks (may clip both edges)
     margin_mode: str = "fit"
+    # the printer's unprintable border (left, bottom, right, top) in
+    # points, from its PPD; punch-zone placement keeps content out of it
+    hw_margins: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     # printer-specific PPD choices, e.g. {"BRResolution": "Fine"}
     extra_options: dict[str, str] = field(default_factory=dict)
 
@@ -173,6 +176,67 @@ def find_option(
 
 def supports_duplex(options: dict[str, PPDOption]) -> bool:
     return any("duplex" in keyword.lower() for keyword in options)
+
+
+_hw_margin_cache: dict[str, tuple[float, float, float, float] | None] = {}
+
+
+def printer_hw_margins(
+    printer: str,
+) -> tuple[float, float, float, float] | None:
+    """The printer's unprintable border (left, bottom, right, top) in pt.
+
+    Read from the queue's PPD, or queried from the device for driverless
+    (IPP) queues. None when it cannot be determined.
+    """
+    if printer in _hw_margin_cache:
+        return _hw_margin_cache[printer]
+    text = None
+    try:
+        with open(f"/etc/cups/ppd/{printer}.ppd", encoding="utf-8",
+                  errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        try:
+            out = subprocess.run(
+                ["lpstat", "-v", printer],
+                capture_output=True, text=True, timeout=10,
+            )
+            match = re.search(r":\s*(ipps?://\S+)", out.stdout)
+            if match:
+                ppd = subprocess.run(
+                    ["driverless", "cat", match.group(1)],
+                    capture_output=True, text=True, timeout=20,
+                )
+                if ppd.returncode == 0:
+                    text = ppd.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    result = _parse_hw_margins(text) if text else None
+    _hw_margin_cache[printer] = result
+    return result
+
+
+def _parse_hw_margins(ppd: str) -> tuple[float, float, float, float] | None:
+    default = re.search(r"\*DefaultImageableArea:\s*(\S+)", ppd)
+    name = re.escape(default.group(1)) if default else r"\S+"
+    area = re.search(
+        rf'\*ImageableArea\s+{name}:\s*"([\d. ]+)"', ppd
+    )
+    dim = re.search(
+        rf'\*PaperDimension\s+{name}:\s*"([\d. ]+)"', ppd
+    )
+    if not area or not dim:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(v) for v in area.group(1).split()[:4])
+        width, height = (float(v) for v in dim.group(1).split()[:2])
+    except ValueError:
+        return None
+    margins = (x0, y0, width - x1, height - y1)
+    if any(m < 0 or m > 72 for m in margins):
+        return None  # implausible; don't trust it
+    return margins
 
 
 def validate_page_range(text: str) -> bool:
@@ -375,8 +439,13 @@ def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
                     continue
                 ink = inks[index]
                 hole = HOLE_GUIDE_MM * MM_TO_PT
-                zone_x0 = box[0] if mirrored else box[0] + hole
-                zone_x1 = box[2] - hole if mirrored else box[2]
+                # keep out of the printer's unprintable border on the
+                # far edge (the punch line is well inside it anyway)
+                hw_l, _, hw_r, _ = job.hw_margins
+                if mirrored:
+                    zone_x0, zone_x1 = box[0] + hw_l, box[2] - hole
+                else:
+                    zone_x0, zone_x1 = box[0] + hole, box[2] - hw_r
                 ink_w = max(ink[2] - ink[0], 1.0)
                 if job.margin_mode == "hole-clip":
                     # original size no matter what; edges may clip

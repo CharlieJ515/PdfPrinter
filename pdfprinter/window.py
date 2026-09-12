@@ -147,6 +147,8 @@ class ZoomablePdfView(QPdfView):
         # punch-hole guide distance from the binding edge, in points;
         # a screen-only overlay, never part of the printed output
         self._hole_guide_pt: float | None = None
+        # printer's unprintable border (left, bottom, right, top) in pt
+        self._hw_margins: tuple[float, float, float, float] | None = None
 
     # ---------- margin guides ----------
 
@@ -167,6 +169,15 @@ class ZoomablePdfView(QPdfView):
 
     def set_hole_guide(self, distance_pt: float | None) -> None:
         self._hole_guide_pt = distance_pt
+        self.viewport().update()
+
+    def set_hw_margins(
+        self, margins: tuple[float, float, float, float] | None
+    ) -> None:
+        """Shade the printer's unprintable border on every page."""
+        if margins is not None and not any(margins):
+            margins = None
+        self._hw_margins = margins
         self.viewport().update()
 
     def _page_layout(self) -> list[tuple[QRectF, float]]:
@@ -209,17 +220,43 @@ class ZoomablePdfView(QPdfView):
 
     def paintEvent(self, event):  # noqa: N802 (Qt naming)
         super().paintEvent(event)
-        if self._margin_guides is None and self._hole_guide_pt is None:
+        if (
+            self._margin_guides is None
+            and self._hole_guide_pt is None
+            and self._hw_margins is None
+        ):
             return
         painter = QPainter(self.viewport())
         margin_pen = QPen(QColor(220, 60, 60, 170))
         margin_pen.setStyle(Qt.PenStyle.DashLine)
         hole_pen = QPen(QColor(60, 60, 220, 170))
         hole_pen.setStyle(Qt.PenStyle.DashLine)
+        hw_brush = QColor(120, 120, 120, 50)
         viewport_rect = QRectF(self.viewport().rect())
         for index, (rect, scale) in enumerate(self._page_layout()):
             if not rect.intersects(viewport_rect):
                 continue
+            if self._hw_margins is not None:
+                # shade what the printer physically cannot print
+                hw_l, hw_b, hw_r, hw_t = (m * scale for m in self._hw_margins)
+                painter.fillRect(
+                    QRectF(rect.left(), rect.top(), hw_l, rect.height()),
+                    hw_brush,
+                )
+                painter.fillRect(
+                    QRectF(rect.right() - hw_r, rect.top(), hw_r, rect.height()),
+                    hw_brush,
+                )
+                painter.fillRect(
+                    QRectF(rect.left() + hw_l, rect.top(),
+                           rect.width() - hw_l - hw_r, hw_t),
+                    hw_brush,
+                )
+                painter.fillRect(
+                    QRectF(rect.left() + hw_l, rect.bottom() - hw_b,
+                           rect.width() - hw_l - hw_r, hw_b),
+                    hw_brush,
+                )
             even = self._mirror_guides and index % 2 == 1  # even page number
             if self._margin_guides is not None:
                 left, top, right, bottom = self._margin_guides
@@ -1249,6 +1286,13 @@ class MainWindow(QMainWindow):
         self._apply_color_preview()  # rebuild bypassed the change signal
         self._update_more_button()
 
+        # the printer's unprintable border: shade it in the preview and
+        # re-place punch-zone content, which keeps out of it
+        self._printer_hw = printing.printer_hw_margins(printer) if printer else None
+        self.viewer.set_hw_margins(self._printer_hw)
+        if self.placement_combo.currentData().startswith("hole"):
+            self._preview_timer.start()
+
     @staticmethod
     def _rebuild_static_combo(
         combo: QComboBox,
@@ -1388,6 +1432,7 @@ class MainWindow(QMainWindow):
             margin_bottom=self.margin_spins["bottom"].value(),
             mirror_margins=self.mirror_check.isChecked(),
             margin_mode=self.placement_combo.currentData(),
+            hw_margins=getattr(self, "_printer_hw", None) or (0.0, 0.0, 0.0, 0.0),
             hole_guide=self.hole_check.isChecked(),
             extra_options=extra_options,
         )
