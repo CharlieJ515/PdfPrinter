@@ -191,40 +191,70 @@ def printer_hw_margins(
     """
     if printer in _hw_margin_cache:
         return _hw_margin_cache[printer]
-    text = None
+    result = None
+    for text in _ppd_sources(printer):
+        result = _parse_hw_margins(text)
+        if result is not None:
+            break
+    _hw_margin_cache[printer] = result
+    return result
+
+
+def _ppd_sources(printer: str):
+    """Yield PPD texts for a queue, most direct source first."""
     try:
         with open(f"/etc/cups/ppd/{printer}.ppd", encoding="utf-8",
                   errors="replace") as fh:
-            text = fh.read()
+            yield fh.read()
     except OSError:
-        try:
+        pass
+    # cupsd serves permanent queues' PPDs regardless of file permissions
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(
+            f"http://localhost:631/printers/{printer}.ppd", timeout=5
+        ) as response:
+            yield response.read().decode("utf-8", errors="replace")
+    except OSError:
+        pass
+    # discovered/driverless printers: query the device itself
+    uri = None
+    try:
+        for cmd in (["lpstat", "-v", printer], ["lpoptions", "-p", printer]):
             out = subprocess.run(
-                ["lpstat", "-v", printer],
-                capture_output=True, text=True, timeout=10,
+                cmd, capture_output=True, text=True, timeout=10
             )
-            match = re.search(r":\s*(ipps?://\S+)", out.stdout)
+            match = re.search(r"((?:ipps?|dnssd)://\S+)", out.stdout)
             if match:
-                ppd = subprocess.run(
-                    ["driverless", "cat", match.group(1)],
-                    capture_output=True, text=True, timeout=20,
-                )
-                if ppd.returncode == 0:
-                    text = ppd.stdout
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    result = _parse_hw_margins(text) if text else None
-    _hw_margin_cache[printer] = result
-    return result
+                uri = match.group(1)
+                break
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if uri is None:
+        return
+    # dnssd URIs resolve through the same mDNS host in ipp form
+    uri = re.sub(r"^dnssd://", "ipp://", uri).split("?")[0]
+    try:
+        ppd = subprocess.run(
+            ["driverless", "cat", uri],
+            capture_output=True, text=True, timeout=20,
+        )
+        if ppd.returncode == 0:
+            yield ppd.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _parse_hw_margins(ppd: str) -> tuple[float, float, float, float] | None:
     default = re.search(r"\*DefaultImageableArea:\s*(\S+)", ppd)
     name = re.escape(default.group(1)) if default else r"\S+"
+    # PPD entries may carry a translation ("*ImageableArea A4/A4: ...")
     area = re.search(
-        rf'\*ImageableArea\s+{name}:\s*"([\d. ]+)"', ppd
+        rf'\*ImageableArea\s+{name}(?:/[^:]*)?:\s*"([\d. ]+)"', ppd
     )
     dim = re.search(
-        rf'\*PaperDimension\s+{name}:\s*"([\d. ]+)"', ppd
+        rf'\*PaperDimension\s+{name}(?:/[^:]*)?:\s*"([\d. ]+)"', ppd
     )
     if not area or not dim:
         return None
