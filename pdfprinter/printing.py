@@ -304,12 +304,9 @@ def preview_job_options(job: PrintJob) -> str:
     return " ".join(layout_options(job))
 
 
-def transform_for_preview(src: str, options: str, dest: str) -> None:
-    """Run CUPS's pdftopdf filter to produce the as-printed document."""
+def _run_pdftopdf(src: str, options: str, dest: str) -> str | None:
+    """Run the filter once; returns None on success, else the error text."""
     global _pdftopdf_args
-    if not pdftopdf_available():
-        raise PrintError(f"{PDFTOPDF} not available")
-
     candidates = (
         [_pdftopdf_args]
         if _pdftopdf_args is not None
@@ -329,9 +326,57 @@ def transform_for_preview(src: str, options: str, dest: str) -> None:
             raise PrintError(f"Failed to run pdftopdf: {exc}") from exc
         if result.returncode == 0:
             _pdftopdf_args = args
-            return
+            return None
         last_error = result.stderr.decode(errors="replace").strip()
-    raise PrintError(last_error.splitlines()[-1] if last_error else "pdftopdf failed")
+    return last_error or "pdftopdf failed"
+
+
+_repair_dir: tempfile.TemporaryDirectory | None = None
+_repair_cache: dict[tuple[str, float], str] = {}
+
+
+def _repaired_copy(src: str) -> str:
+    """Rewrite a PDF with Ghostscript, fixing structural defects.
+
+    Cached per (path, mtime) so repeated preview updates on the same
+    document pay the repair cost once.
+    """
+    global _repair_dir
+    key = (src, os.path.getmtime(src))
+    cached = _repair_cache.get(key)
+    if cached and os.path.isfile(cached):
+        return cached
+    if _repair_dir is None:
+        _repair_dir = tempfile.TemporaryDirectory(prefix="pdfprinter-repair-")
+    dest = os.path.join(_repair_dir.name, f"{abs(hash(key))}.pdf")
+    tmp = f"{dest}.{os.getpid()}.tmp"
+    _run_gs(src, tmp, "")
+    os.replace(tmp, dest)
+    _repair_cache[key] = dest
+    return dest
+
+
+def transform_for_preview(src: str, options: str, dest: str) -> None:
+    """Run CUPS's pdftopdf filter to produce the as-printed document."""
+    if not pdftopdf_available():
+        raise PrintError(f"{PDFTOPDF} not available")
+    error = _run_pdftopdf(src, options, dest)
+    if error is None:
+        return
+    # real-world PDFs with structural defects (e.g. annotation appearance
+    # streams missing /BBox) make pdftopdf fail outright; a Ghostscript
+    # rewrite repairs them, so retry on a repaired copy
+    if shutil.which("gs") is not None:
+        try:
+            repaired = _repaired_copy(src)
+        except PrintError:
+            repaired = None
+        if repaired is not None:
+            retry_error = _run_pdftopdf(repaired, options, dest)
+            if retry_error is None:
+                return
+            error = retry_error
+    raise PrintError(error.splitlines()[-1] if error else "pdftopdf failed")
 
 
 def make_page_subset(src: str, page_range: str, dest: str) -> None:

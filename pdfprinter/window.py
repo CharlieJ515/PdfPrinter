@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 
 from PyQt6.QtCore import (
@@ -1030,7 +1031,9 @@ class MainWindow(QMainWindow):
             self._apply_layout_preview()
             return
         if error is not None:
-            self.statusBar().showMessage(f"Preview failed: {error}", 5000)
+            # stays until the next preview succeeds; full text on stderr
+            self.statusBar().showMessage(f"Preview failed: {error}")
+            print(f"pdfprinter: preview failed: {error}", file=sys.stderr)
             return
         if result == source:
             self.statusBar().clearMessage()
