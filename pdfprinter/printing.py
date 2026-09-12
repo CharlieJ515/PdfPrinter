@@ -45,6 +45,8 @@ class PrintJob:
     # show a punch guide 18 mm from the binding edge in the PREVIEW
     # only — it is never part of the printed output
     hole_guide: bool = False
+    # manual content scale; 100 = original size
+    scale_percent: int = 100
     # printer-specific PPD choices, e.g. {"BRResolution": "Fine"}
     extra_options: dict[str, str] = field(default_factory=dict)
 
@@ -233,6 +235,10 @@ def margins_active(job: PrintJob) -> bool:
     )
 
 
+def needs_gs_pass(job: PrintJob) -> bool:
+    return margins_active(job) or job.scale_percent != 100
+
+
 
 
 def _margin_ps(job: PrintJob) -> str:
@@ -245,7 +251,7 @@ def _margin_ps(job: PrintJob) -> str:
     return (
         f"/MLbase {left:.2f} def /MRbase {right:.2f} def "
         f"/MT {top:.2f} def /MB {bottom:.2f} def "
-        f"/MIRROR {mirror} def "
+        f"/MIRROR {mirror} def /USC {job.scale_percent / 100:.4f} def "
         "<< /BeginPage { "
         # showpage count on the stack -> 1-based page number
         "1 add /PN exch def "
@@ -256,6 +262,8 @@ def _margin_ps(job: PrintJob) -> str:
         "/SX PW ML MR add sub PW div def "
         "/SY PH MT MB add sub PH div def "
         "/S SX SY 2 copy gt {exch} if pop def "
+        # manual scale composes with the margin fit, centered in the box
+        "/S S USC mul def "
         "ML PW PW S mul sub ML MR add sub 2 div add "
         "MB PH PH S mul sub MT MB add sub 2 div add "
         "translate S S scale "
@@ -286,9 +294,9 @@ def apply_margins(src: str, dest: str, job: PrintJob) -> None:
     is used for printing and previewing, so both always match.
     """
     if shutil.which("gs") is None:
-        raise PrintError("Ghostscript (gs) is required for margins")
-    if not margins_active(job):
-        raise PrintError("No margins set")
+        raise PrintError("Ghostscript (gs) is required for margins/scaling")
+    if not needs_gs_pass(job):
+        raise PrintError("No margins or manual scale set")
     _run_gs(src, dest, _margin_ps(job))
 
 
@@ -377,7 +385,7 @@ def print_file(path: str, job: PrintJob) -> str:
                 # no local pdftopdf: fall back to server-side options
                 for option in options:
                     cmd += ["-o", option]
-            if margins_active(job):
+            if needs_gs_pass(job):
                 margined = os.path.join(tmpdir, "margined.pdf")
                 apply_margins(work, margined, job)
                 work = margined

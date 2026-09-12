@@ -422,6 +422,9 @@ class _TransformWorker(QThread):
             self.done.emit(self._task(), None)
         except printing.PrintError as exc:
             self.done.emit(None, str(exc))
+        except Exception as exc:  # noqa: BLE001 — an exception escaping a
+            # QThread aborts the whole process, so nothing may get through
+            self.done.emit(None, f"{type(exc).__name__}: {exc}")
 
 
 class ZoteroDialog(QDialog):
@@ -693,6 +696,16 @@ class MainWindow(QMainWindow):
             self.scaling_combo.addItem(label, value)
         form.addRow("Scaling", self.scaling_combo)
 
+        self.scale_spin = QSpinBox()
+        self.scale_spin.setRange(25, 400)
+        self.scale_spin.setSuffix(" %")
+        self.scale_spin.setValue(100)
+        self.scale_spin.setToolTip(
+            "Manual content scale, centered on the page (and inside "
+            "the margins when set)"
+        )
+        form.addRow("Scale", self.scale_spin)
+
         self.pageset_combo = QComboBox()
         for label, value in PAGE_SET_CHOICES:
             self.pageset_combo.addItem(label, value)
@@ -798,6 +811,8 @@ class MainWindow(QMainWindow):
             spin.valueChanged.connect(self._preview_timer.start)
         self.mirror_check.toggled.connect(self._preview_timer.start)
         self.hole_check.toggled.connect(self._preview_timer.start)
+        self.scale_spin.valueChanged.connect(self._preview_timer.start)
+        self.scale_spin.valueChanged.connect(self._update_more_button)
 
         # keep the collapsed "more options" button honest about what's set
         for combo in (
@@ -941,7 +956,7 @@ class MainWindow(QMainWindow):
             printing.HOLE_GUIDE_MM * printing.MM_TO_PT if job.hole_guide else None
         )
         options = printing.preview_job_options(job)
-        has_margins = printing.margins_active(job)
+        has_margins = printing.needs_gs_pass(job)
         if not options and not has_margins:
             if self._showing_transformed:
                 self._load_preserving_view(self.current_path)
@@ -1058,6 +1073,7 @@ class MainWindow(QMainWindow):
                 and "(default)" not in combo.currentText()
             )
         count += bool(self.scaling_combo.currentData())
+        count += self.scale_spin.value() != 100
         count += bool(self.pageset_combo.currentData())
         count += self.collate_check.isEnabled() and self.collate_check.isChecked()
         count += self.reverse_check.isChecked()
@@ -1254,6 +1270,7 @@ class MainWindow(QMainWindow):
             page_set=self.pageset_combo.currentData(),
             reverse=self.reverse_check.isChecked(),
             scaling=self.scaling_combo.currentData(),
+            scale_percent=self.scale_spin.value(),
             margin_left=self.margin_spins["left"].value(),
             margin_right=self.margin_spins["right"].value(),
             margin_top=self.margin_spins["top"].value(),
@@ -1307,6 +1324,7 @@ class MainWindow(QMainWindow):
         pick(self.nup_combo, job.number_up)
         pick(self.nup_layout_combo, job.number_up_layout)
         pick(self.scaling_combo, job.scaling)
+        self.scale_spin.setValue(job.scale_percent)
         pick(self.pageset_combo, job.page_set)
         self.collate_check.setChecked(job.collate)
         self.reverse_check.setChecked(job.reverse)
