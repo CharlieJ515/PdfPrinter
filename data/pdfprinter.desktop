@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=PDF Printer
+Comment=Print PDFs via CUPS with a preview
+Exec=pdfprinter %f
+Icon=document-print
+Terminal=false
+Categories=Office;Printing;Qt;
+MimeType=application/pdf;

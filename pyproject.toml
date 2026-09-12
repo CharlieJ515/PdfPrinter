@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdfprinter"
+version = "0.1.0"
+description = "Simple GUI for printing PDFs on Linux (X11 and Wayland) via CUPS"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Charlie Jang", email = "charlie.jang515@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = ["PyQt6"]
+
+[project.scripts]
+pdfprinter = "pdfprinter.main:main"
+
+[tool.setuptools.packages.find]
+include = ["pdfprinter*"]
