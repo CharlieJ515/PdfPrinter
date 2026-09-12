@@ -756,6 +756,12 @@ class MainWindow(QMainWindow):
             )
             self.margin_spins[key] = spin
             margins_form.addRow(label, spin)
+        self.shift_check = QCheckBox("Keep original size (shift)")
+        self.shift_check.setToolTip(
+            "Move the content instead of shrinking it to fit the "
+            "margins — it may get cut off at the opposite edge"
+        )
+        margins_form.addRow("", self.shift_check)
         self.mirror_check = QCheckBox("Mirror margins (binding)")
         self.mirror_check.setToolTip(
             "For double-sided printing into a binder: even pages get the "
@@ -823,6 +829,7 @@ class MainWindow(QMainWindow):
         self.reverse_check.toggled.connect(self._preview_timer.start)
         for spin in self.margin_spins.values():
             spin.valueChanged.connect(self._preview_timer.start)
+        self.shift_check.toggled.connect(self._preview_timer.start)
         self.mirror_check.toggled.connect(self._preview_timer.start)
         self.hole_check.toggled.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._preview_timer.start)
@@ -1300,6 +1307,7 @@ class MainWindow(QMainWindow):
             margin_top=self.margin_spins["top"].value(),
             margin_bottom=self.margin_spins["bottom"].value(),
             mirror_margins=self.mirror_check.isChecked(),
+            margin_shift=self.shift_check.isChecked(),
             hole_guide=self.hole_check.isChecked(),
             extra_options=extra_options,
         )
@@ -1367,6 +1375,7 @@ class MainWindow(QMainWindow):
         self.margin_spins["top"].setValue(round(job.margin_top))
         self.margin_spins["bottom"].setValue(round(job.margin_bottom))
         self.mirror_check.setChecked(job.mirror_margins)
+        self.shift_check.setChecked(job.margin_shift)
         self.hole_check.setChecked(job.hole_guide)
         self._preview_timer.start()
 

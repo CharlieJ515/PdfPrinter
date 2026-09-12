@@ -47,6 +47,9 @@ class PrintJob:
     hole_guide: bool = False
     # manual content scale; 100 = original size
     scale_percent: int = 100
+    # margins shift the content at original size instead of shrinking
+    # it to fit — the opposite edge may clip
+    margin_shift: bool = False
     # printer-specific PPD choices, e.g. {"BRResolution": "Fine"}
     extra_options: dict[str, str] = field(default_factory=dict)
 
@@ -252,6 +255,7 @@ def _margin_ps(job: PrintJob) -> str:
         f"/MLbase {left:.2f} def /MRbase {right:.2f} def "
         f"/MT {top:.2f} def /MB {bottom:.2f} def "
         f"/MIRROR {mirror} def /USC {job.scale_percent / 100:.4f} def "
+        f"/SHIFT {'true' if job.margin_shift else 'false'} def "
         "<< /BeginPage { "
         # showpage count on the stack -> 1-based page number
         "1 add /PN exch def "
@@ -259,6 +263,12 @@ def _margin_ps(job: PrintJob) -> str:
         "{ /ML MRbase def /MR MLbase def } "
         "{ /ML MLbase def /MR MRbase def } ifelse "
         "currentpagedevice /PageSize get aload pop /PH exch def /PW exch def "
+        "SHIFT { "
+        # original size: translate only, may clip the opposite edge
+        "/S USC def "
+        "PW PW S mul sub 2 div ML MR sub add "
+        "PH PH S mul sub 2 div MB MT sub add "
+        "} { "
         "/SX PW ML MR add sub PW div def "
         "/SY PH MT MB add sub PH div def "
         "/S SX SY 2 copy gt {exch} if pop def "
@@ -266,6 +276,7 @@ def _margin_ps(job: PrintJob) -> str:
         "/S S USC mul def "
         "ML PW PW S mul sub ML MR add sub 2 div add "
         "MB PH PH S mul sub MT MB add sub 2 div add "
+        "} ifelse "
         "translate S S scale "
         "} >> setpagedevice"
     )
@@ -313,13 +324,20 @@ def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
             ml, mr = left, right
             if job.mirror_margins and (index + 1) % 2 == 0:
                 ml, mr = mr, ml
-            fit = min(
-                (page_w - ml - mr) / page_w, (page_h - top - bottom) / page_h
-            )
-            scale = max(0.01, fit * user_scale)
-            # center the scaled content inside the margin box
-            tx = box[0] + ml + (page_w - page_w * scale - ml - mr) / 2
-            ty = box[1] + bottom + (page_h - page_h * scale - top - bottom) / 2
+            if job.margin_shift:
+                # keep original size: translate only, may clip opposite edge
+                scale = max(0.01, user_scale)
+                tx = box[0] + (page_w - page_w * scale) / 2 + (ml - mr)
+                ty = box[1] + (page_h - page_h * scale) / 2 + (bottom - top)
+            else:
+                fit = min(
+                    (page_w - ml - mr) / page_w,
+                    (page_h - top - bottom) / page_h,
+                )
+                scale = max(0.01, fit * user_scale)
+                # center the scaled content inside the margin box
+                tx = box[0] + ml + (page_w - page_w * scale - ml - mr) / 2
+                ty = box[1] + bottom + (page_h - page_h * scale - top - bottom) / 2
             tx -= scale * box[0]
             ty -= scale * box[1]
             page.contents_add(
