@@ -1142,8 +1142,10 @@ class MainWindow(QMainWindow):
             self.load_pdf(dialog.selected_path)
 
     def open_dialog(self) -> None:
+        # start where the current document lives (also a Zotero folder)
+        directory = os.path.dirname(self.current_path) if self.current_path else ""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open PDF", "", "PDF files (*.pdf);;All files (*)"
+            self, "Open PDF", directory, "PDF files (*.pdf);;All files (*)"
         )
         if path:
             self.load_pdf(path)
