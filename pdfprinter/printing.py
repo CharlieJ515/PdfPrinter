@@ -48,9 +48,11 @@ class PrintJob:
     # manual content scale; 100 = original size
     scale_percent: int = 100
     # how margins place the content:
-    #   fit   — shrink into the margin box (nothing clips)
-    #   shift — translate at original size (opposite edge may clip)
-    #   hole  — center the ink between the punch line and the far edge
+    #   fit       — shrink into the margin box (nothing clips)
+    #   shift     — translate at original size (opposite edge may clip)
+    #   hole      — center the ink between the punch line and the far
+    #               edge, shrinking only if it is wider than the zone
+    #   hole-clip — same centering, never shrinks (may clip both edges)
     margin_mode: str = "fit"
     # printer-specific PPD choices, e.g. {"BRResolution": "Fine"}
     extra_options: dict[str, str] = field(default_factory=dict)
@@ -244,7 +246,7 @@ def needs_gs_pass(job: PrintJob) -> bool:
     return (
         margins_active(job)
         or job.scale_percent != 100
-        or job.margin_mode == "hole"
+        or job.margin_mode.startswith("hole")
     )
 
 
@@ -352,7 +354,7 @@ def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
     bottom = job.margin_bottom * MM_TO_PT
     user_scale = job.scale_percent / 100.0
 
-    inks = ink_boxes(src) if job.margin_mode == "hole" else []
+    inks = ink_boxes(src) if job.margin_mode.startswith("hole") else []
 
     with pikepdf.open(src) as pdf:
         for index, page in enumerate(pdf.pages):
@@ -362,7 +364,7 @@ def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
                 continue
             mirrored = job.mirror_margins and (index + 1) % 2 == 0
             ml, mr = (right, left) if mirrored else (left, right)
-            if job.margin_mode == "hole":
+            if job.margin_mode.startswith("hole"):
                 # center the ink between the punch line and the far edge
                 if index >= len(inks):
                     continue
@@ -371,9 +373,13 @@ def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
                 zone_x0 = box[0] if mirrored else box[0] + hole
                 zone_x1 = box[2] - hole if mirrored else box[2]
                 ink_w = max(ink[2] - ink[0], 1.0)
-                scale = max(
-                    0.01, min(user_scale, (zone_x1 - zone_x0) / ink_w)
-                )
+                if job.margin_mode == "hole-clip":
+                    # original size no matter what; edges may clip
+                    scale = max(0.01, user_scale)
+                else:
+                    scale = max(
+                        0.01, min(user_scale, (zone_x1 - zone_x0) / ink_w)
+                    )
                 ink_cx = (ink[0] + ink[2]) / 2
                 ink_cy = (ink[1] + ink[3]) / 2
                 tx = (zone_x0 + zone_x1) / 2 - scale * ink_cx
@@ -436,7 +442,7 @@ def apply_margins(src: str, dest: str, job: PrintJob) -> None:
             return
         except Exception:
             pass
-    if job.margin_mode == "hole":
+    if job.margin_mode.startswith("hole"):
         raise PrintError("Punch-zone centering requires python-pikepdf")
     if shutil.which("gs") is None:
         raise PrintError(

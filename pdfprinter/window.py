@@ -760,6 +760,9 @@ class MainWindow(QMainWindow):
         self.placement_combo.addItem("Shrink to fit margins", "fit")
         self.placement_combo.addItem("Shift by margins (may clip)", "shift")
         self.placement_combo.addItem("Center right of punch line", "hole")
+        self.placement_combo.addItem(
+            "Center on punch line, no shrink (may clip)", "hole-clip"
+        )
         self.placement_combo.setToolTip(
             "Fit: shrink content into the margins. Shift: move it at "
             "original size. Punch line: center the measured content "
@@ -768,7 +771,9 @@ class MainWindow(QMainWindow):
         )
         self.placement_combo.currentIndexChanged.connect(
             lambda: [
-                spin.setEnabled(self.placement_combo.currentData() != "hole")
+                spin.setEnabled(
+                    not self.placement_combo.currentData().startswith("hole")
+                )
                 for spin in self.margin_spins.values()
             ]
         )
@@ -975,7 +980,7 @@ class MainWindow(QMainWindow):
         job = self._current_job()
         # margins are applied after all other transforms, so guide sides
         # follow the displayed page order and parity is always right
-        hole_mode = job.margin_mode == "hole"
+        hole_mode = job.margin_mode.startswith("hole")
         self.viewer.set_margin_guides(
             None
             if hole_mode  # margins are ignored in punch-zone placement
