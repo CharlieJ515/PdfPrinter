@@ -272,12 +272,12 @@ def _margin_ps(job: PrintJob) -> str:
 
 
 def _run_gs(src: str, dest: str, postscript: str) -> None:
-    # PDF 1.4 flattens transparency and normalizes constructs that some
-    # printer filters (e.g. Canon UFR II, error #853) cannot process
+    # NOTE: do not add -dCompatibilityLevel=1.4 here — its output makes
+    # CUPS's pdftopdf fail ("missing required flags"), which reaches the
+    # printer as broken data (Canon error #853)
     cmd = [
         "gs", "-q", "-dBATCH", "-dNOPAUSE", "-dSAFER",
-        "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.4",
-        "-o", dest, "-c", postscript, "-f", src,
+        "-sDEVICE=pdfwrite", "-o", dest, "-c", postscript, "-f", src,
     ]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -528,6 +528,17 @@ def print_file(path: str, job: PrintJob) -> str:
                 margined = os.path.join(tmpdir, "margined.pdf")
                 apply_margins(work, margined, job)
                 work = margined
+            # final guard: CUPS runs pdftopdf server-side on every job;
+            # if it would fail on our file, the printer receives broken
+            # data and errors out (e.g. Canon #853) — check locally and
+            # repair the outgoing file if needed
+            if pdftopdf_available():
+                probe = os.path.join(tmpdir, "probe.pdf")
+                if _run_pdftopdf(work, "", probe) is not None:
+                    fixed = os.path.join(tmpdir, "sanitized.pdf")
+                    _run_gs(work, fixed, "")
+                    if _run_pdftopdf(fixed, "", probe) is None:
+                        work = fixed
             cmd += ["--", work]
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
