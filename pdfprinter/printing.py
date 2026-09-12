@@ -285,18 +285,76 @@ def _run_gs(src: str, dest: str, postscript: str) -> None:
         raise PrintError(message.splitlines()[-1] if message else "gs failed")
 
 
-def apply_margins(src: str, dest: str, job: PrintJob) -> None:
-    """Apply margins by rewriting the PDF with Ghostscript.
+def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
+    """Wrap each page's content in a scale+center matrix with pikepdf.
 
-    CUPS's pdftopdf ignores the page-left/right/top/bottom options, so
-    Ghostscript does the work: it scales and centers each page inside
-    the margin box (mirrored on even pages if requested). The same file
-    is used for printing and previewing, so both always match.
+    Exact and per-page: unlike the Ghostscript BeginPage approach, page
+    sizes are left untouched (gs's PDF interpreter folds a BeginPage
+    CTM scale into the output page size for non-default page sizes,
+    silently cancelling the margins).
     """
-    if shutil.which("gs") is None:
-        raise PrintError("Ghostscript (gs) is required for margins/scaling")
+    import pikepdf
+
+    left = job.margin_left * MM_TO_PT
+    right = job.margin_right * MM_TO_PT
+    top = job.margin_top * MM_TO_PT
+    bottom = job.margin_bottom * MM_TO_PT
+    user_scale = job.scale_percent / 100.0
+
+    with pikepdf.open(src) as pdf:
+        for index, page in enumerate(pdf.pages):
+            box = [float(v) for v in page.mediabox]
+            page_w, page_h = box[2] - box[0], box[3] - box[1]
+            if page_w <= 0 or page_h <= 0:
+                continue
+            ml, mr = left, right
+            if job.mirror_margins and (index + 1) % 2 == 0:
+                ml, mr = mr, ml
+            fit = min(
+                (page_w - ml - mr) / page_w, (page_h - top - bottom) / page_h
+            )
+            scale = max(0.01, fit * user_scale)
+            # center the scaled content inside the margin box
+            tx = box[0] + ml + (page_w - page_w * scale - ml - mr) / 2
+            ty = box[1] + bottom + (page_h - page_h * scale - top - bottom) / 2
+            tx -= scale * box[0]
+            ty -= scale * box[1]
+            page.contents_add(
+                pikepdf.Stream(
+                    pdf,
+                    f"q {scale:.5f} 0 0 {scale:.5f} {tx:.3f} {ty:.3f} cm\n".encode(),
+                ),
+                prepend=True,
+            )
+            page.contents_add(pikepdf.Stream(pdf, b"\nQ"), prepend=False)
+        pdf.save(dest)
+
+
+def apply_margins(src: str, dest: str, job: PrintJob) -> None:
+    """Apply margins/manual scale by rewriting the PDF.
+
+    Prefers pikepdf (exact, keeps page sizes); falls back to a
+    Ghostscript BeginPage transform when pikepdf is unavailable. The
+    same file is used for printing and previewing, so both always match.
+    """
     if not needs_gs_pass(job):
         raise PrintError("No margins or manual scale set")
+    try:
+        _apply_margins_pikepdf(src, dest, job)
+        return
+    except ImportError:
+        pass
+    except Exception:
+        # broken input pikepdf cannot parse: try a repaired copy
+        try:
+            _apply_margins_pikepdf(_repaired_copy(src), dest, job)
+            return
+        except Exception:
+            pass
+    if shutil.which("gs") is None:
+        raise PrintError(
+            "python-pikepdf or Ghostscript (gs) is required for margins/scaling"
+        )
     _run_gs(src, dest, _margin_ps(job))
 
 

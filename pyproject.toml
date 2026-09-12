@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Charlie Jang", email = "charlie.jang515@gmail.com" }]
 requires-python = ">=3.12"
-dependencies = ["PyQt6"]
+dependencies = ["PyQt6", "pikepdf"]
 
 [project.scripts]
 pdfprinter = "pdfprinter.main:main"

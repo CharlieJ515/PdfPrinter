@@ -6,7 +6,7 @@ pkgdesc="Qt6 GUI for printing PDFs via CUPS (X11 and Wayland)"
 arch=('any')
 url="https://github.com/CharlieJ515/PdfPrinter"
 license=('MIT')
-depends=('python' 'python-pyqt6' 'cups' 'ghostscript')
+depends=('python' 'python-pyqt6' 'python-pikepdf' 'cups' 'ghostscript')
 optdepends=('qpdf: page-range preview fallback when cups pdftopdf is unavailable')
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
 # For local development builds; replace with a tarball/git source when
