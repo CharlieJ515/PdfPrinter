@@ -169,58 +169,55 @@ class ZoomablePdfView(QPdfView):
         self._hole_guide_pt = distance_pt
         self.viewport().update()
 
-    def _page_scale(self) -> float:
-        """Pixels per PDF point at the current zoom."""
-        doc = self.document()
-        if doc is None or doc.pageCount() == 0:
-            return 1.0
-        if self.zoomMode() == QPdfView.ZoomMode.Custom:
-            return self.zoomFactor() * self.logicalDpiX() / 72.0
-        widest = max(
-            doc.pagePointSize(p).width() for p in range(doc.pageCount())
-        )
-        margins = self.documentMargins()
-        available = self.viewport().width() - margins.left() - margins.right()
-        return max(available, 1) / widest
+    def _page_layout(self) -> list[tuple[QRectF, float]]:
+        """Each page's viewport rectangle and its pixels-per-point scale.
 
-    def _page_rects(self) -> list[QRectF]:
-        """Each page's rectangle in viewport coordinates."""
+        Mirrors QPdfView's layout: in fit-to-width mode every page is
+        scaled INDIVIDUALLY to fill the viewport width (page sizes may
+        differ), while custom zoom uses one uniform factor.
+        """
         doc = self.document()
         if doc is None or doc.pageCount() == 0:
             return []
-        scale = self._page_scale()
         margins = self.documentMargins()
         spacing = self.pageSpacing()
-        widest = max(
-            doc.pagePointSize(p).width() for p in range(doc.pageCount())
+        custom = self.zoomMode() == QPdfView.ZoomMode.Custom
+        uniform = self.zoomFactor() * self.logicalDpiX() / 72.0
+        available = max(
+            self.viewport().width() - margins.left() - margins.right(), 1
         )
-        content_w = max(
-            self.viewport().width(),
-            widest * scale + margins.left() + margins.right(),
-        )
+        if custom:
+            widest = max(
+                doc.pagePointSize(p).width() for p in range(doc.pageCount())
+            )
+            content_w = max(
+                self.viewport().width(),
+                widest * uniform + margins.left() + margins.right(),
+            )
         offset_x = self.horizontalScrollBar().value()
         offset_y = self.verticalScrollBar().value()
-        rects = []
+        layout = []
         y = float(margins.top())
         for page in range(doc.pageCount()):
             size = doc.pagePointSize(page)
+            scale = uniform if custom else available / max(size.width(), 1)
             w, h = size.width() * scale, size.height() * scale
-            rects.append(QRectF((content_w - w) / 2 - offset_x, y - offset_y, w, h))
+            x = (content_w - w) / 2 if custom else float(margins.left())
+            layout.append((QRectF(x - offset_x, y - offset_y, w, h), scale))
             y += h + spacing
-        return rects
+        return layout
 
     def paintEvent(self, event):  # noqa: N802 (Qt naming)
         super().paintEvent(event)
         if self._margin_guides is None and self._hole_guide_pt is None:
             return
-        scale = self._page_scale()
         painter = QPainter(self.viewport())
         margin_pen = QPen(QColor(220, 60, 60, 170))
         margin_pen.setStyle(Qt.PenStyle.DashLine)
         hole_pen = QPen(QColor(60, 60, 220, 170))
         hole_pen.setStyle(Qt.PenStyle.DashLine)
         viewport_rect = QRectF(self.viewport().rect())
-        for index, rect in enumerate(self._page_rects()):
+        for index, (rect, scale) in enumerate(self._page_layout()):
             if not rect.intersects(viewport_rect):
                 continue
             even = self._mirror_guides and index % 2 == 1  # even page number
