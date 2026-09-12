@@ -746,10 +746,16 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(margins_group)
         side_layout.addStretch(1)
 
+        settings_row = QHBoxLayout()
         self.last_button = QPushButton("Use last print's settings")
         self.last_button.setEnabled(printing.load_last_job() is not None)
         self.last_button.clicked.connect(self._load_last_settings)
-        side_layout.addWidget(self.last_button)
+        settings_row.addWidget(self.last_button, stretch=1)
+        reset_button = QPushButton("Reset")
+        reset_button.setToolTip("Reset all print options to their defaults")
+        reset_button.clicked.connect(self._reset_settings)
+        settings_row.addWidget(reset_button)
+        side_layout.addLayout(settings_row)
 
         self.print_button = QPushButton("Print")
         self.print_button.setDefault(True)
@@ -1256,6 +1262,21 @@ class MainWindow(QMainWindow):
             hole_guide=self.hole_check.isChecked(),
             extra_options=extra_options,
         )
+
+    def _reset_settings(self) -> None:
+        """Reset every print option to defaults, keeping the printer."""
+        self._apply_job_to_ui(
+            printing.PrintJob(printer=self.printer_combo.currentText())
+        )
+        # per-printer combos: back to the driver's default choice
+        for combo in (self.quality_combo, self.source_combo, self.mediatype_combo):
+            for index in range(combo.count()):
+                if "(default)" in combo.itemText(index):
+                    combo.setCurrentIndex(index)
+                    break
+            else:
+                combo.setCurrentIndex(0)
+        self.statusBar().showMessage("Settings reset to defaults", 5000)
 
     def _load_last_settings(self) -> None:
         job = printing.load_last_job()
