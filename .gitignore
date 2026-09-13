@@ -5,3 +5,4 @@ dist/
 *.pkg.tar.zst
 *.egg-info/
 __pycache__/
+*.zip
