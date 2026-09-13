@@ -759,9 +759,10 @@ class ZoomablePdfView(QPdfView):
 class SuffixSpinBox(QSpinBox):
     """Spin box whose unit suffix is not editable ground.
 
-    Clicking while the special value ("Default") is shown selects the
-    whole text so typing replaces it; once a number with a unit suffix
-    is shown, the cursor and any selection are kept out of the suffix.
+    Any click on the field (frame or text) selects the entire text so
+    typing replaces the value. A bare caret can never sit inside the
+    unit suffix; step arrows appear only while the cursor hovers the
+    field.
     """
 
     def __init__(self, parent=None):
@@ -769,14 +770,24 @@ class SuffixSpinBox(QSpinBox):
         self._clamping = False
         self.lineEdit().cursorPositionChanged.connect(self._clamp_cursor)
         self.lineEdit().installEventFilter(self)
+        # plain field at rest; step arrows appear under the cursor
+        self.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
 
-    def _showing_special(self) -> bool:
-        return bool(self.specialValueText()) and self.value() == self.minimum()
+    def enterEvent(self, event):  # noqa: N802 (Qt naming)
+        super().enterEvent(event)
+        if self.isEnabled():
+            self.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+
+    def leaveEvent(self, event):  # noqa: N802 (Qt naming)
+        super().leaveEvent(event)
+        self.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
 
     def _cursor_limit(self) -> int:
         text = self.lineEdit().text()
         suffix = self.suffix()
-        if suffix and text.endswith(suffix) and not self._showing_special():
+        if suffix and text.endswith(suffix) and (
+            not self.specialValueText() or self.value() != self.minimum()
+        ):
             return len(text) - len(suffix)
         return len(text)
 
@@ -784,34 +795,19 @@ class SuffixSpinBox(QSpinBox):
         if self._clamping:
             return
         edit = self.lineEdit()
+        if edit.hasSelectedText():
+            return  # selections may span the suffix (select-all)
         limit = self._cursor_limit()
-        self._clamping = True
-        try:
-            if edit.hasSelectedText():
-                start = edit.selectionStart()
-                end = start + len(edit.selectedText())
-                if start > limit or end > limit:
-                    start = min(start, limit)
-                    edit.setSelection(start, min(end, limit) - start)
-            elif new > limit:
+        if new > limit:
+            self._clamping = True
+            try:
                 edit.setCursorPosition(limit)
-        finally:
-            self._clamping = False
+            finally:
+                self._clamping = False
 
     def _clamp_now(self) -> None:
-        """Apply the suffix clamp to wherever the cursor currently is.
-
-        Needed because focus-in and programmatic text updates can park
-        the cursor at the end without emitting cursorPositionChanged.
-        """
         edit = self.lineEdit()
         self._clamp_cursor(edit.cursorPosition(), edit.cursorPosition())
-
-    def _after_entry(self) -> None:
-        if self._showing_special():
-            self.selectAll()
-        else:
-            self._clamp_now()
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt naming)
         # clicks and focus land on the child line edit, not on the spin
@@ -820,16 +816,21 @@ class SuffixSpinBox(QSpinBox):
             QEvent.Type.FocusIn,
             QEvent.Type.MouseButtonPress,
         ):
-            QTimer.singleShot(0, self._after_entry)
+            QTimer.singleShot(0, self.selectAll)
         return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event):  # noqa: N802 (Qt naming)
+        # clicks on the frame around the line edit select too
+        super().mousePressEvent(event)
+        QTimer.singleShot(0, self.selectAll)
 
     def stepBy(self, steps: int) -> None:  # noqa: N802 (Qt naming)
         super().stepBy(steps)
         QTimer.singleShot(0, self._clamp_now)
 
     def wheelEvent(self, event):  # noqa: N802 (Qt naming)
-        # these fields show no step arrows, so wheel-stepping would be
-        # an invisible affordance; let the wheel scroll the sidebar
+        # these fields show no step arrows at rest, so wheel-stepping
+        # would be an invisible affordance; the wheel scrolls the pane
         event.ignore()
 
 

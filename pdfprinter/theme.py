@@ -503,8 +503,10 @@ def _i_refresh(p: QPainter, c: QColor) -> None:
     # two arcs with wide gaps, closed by solid heads: still reads as
     # circular arrows when the whole glyph is only 14 px across
     rect = QRectF(4.6, 4.6, 14.8, 14.8)
-    p.drawArc(rect, int(115 * 16), int(130 * 16))  # left side
-    p.drawArc(rect, int(295 * 16), int(130 * 16))  # right side
+    # short arcs leave clear air on both sides of each arrowhead, so
+    # the two arrows read as separate even at 15 px
+    p.drawArc(rect, int(127 * 16), int(103 * 16))  # left side
+    p.drawArc(rect, int(307 * 16), int(103 * 16))  # right side
     p.save()
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(c)
