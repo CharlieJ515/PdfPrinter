@@ -928,8 +928,15 @@ QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
     border: none;
     background: transparent;
 }
-QAbstractSpinBox::up-button { subcontrol-position: top right; }
-QAbstractSpinBox::down-button { subcontrol-position: bottom right; }
+QAbstractSpinBox::up-button {
+    subcontrol-position: top right;
+    /* pull the glyph toward the field's middle line */
+    padding-top: 6px;
+}
+QAbstractSpinBox::down-button {
+    subcontrol-position: bottom right;
+    padding-bottom: 6px;
+}
 QAbstractSpinBox::up-arrow {
     image: $img_spin_up;
     width: 10px;
