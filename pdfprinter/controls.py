@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import theme
+from . import printing, theme
+
 
 def _repolish(widget: QWidget) -> None:
     """Re-evaluate the stylesheet after a dynamic property changed."""

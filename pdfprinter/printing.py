@@ -26,6 +26,7 @@ from .cups import (  # noqa: F401
 )
 from .transforms import (  # noqa: F401
     apply_margins,
+    build_output,
     content_ink_boxes,
     ink_boxes,
     layout_options,

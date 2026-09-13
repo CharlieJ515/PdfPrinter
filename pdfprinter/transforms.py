@@ -457,6 +457,11 @@ def apply_margins(src: str, dest: str, job: PrintJob) -> None:
 
 
 def preview_job_options(job: PrintJob) -> str:
+    """:func:`layout_options` as the single pdftopdf argument string.
+
+    The only place the options are joined; everything that needs the
+    string form goes through here.
+    """
     return " ".join(layout_options(job))
 
 
@@ -558,6 +563,46 @@ def make_page_subset(src: str, page_range: str, dest: str) -> None:
         raise PrintError(out.stderr.strip() or "qpdf failed")
 
 
+def build_output(
+    src: str, job: PrintJob, workdir: str, *, qpdf_fallback: bool = True
+) -> tuple[str, bool]:
+    """Produce the transformed document for `job` in `workdir`.
+
+    Returns (path, layout_applied): path is `src` itself when nothing
+    applies; layout_applied says whether layout options were applied
+    locally (False means the caller must pass them to CUPS).
+
+    Layout (pdftopdf) runs first and margins/scale/placement are applied
+    to its result, so mirrored margins follow the final output order --
+    e.g. with pages 2-5, output page 1 (source page 2) gets the left
+    margin. Preview and print share this function so they can never
+    diverge; the print path wraps it in its own sanitize/guard passes.
+    """
+    work = src
+    layout_applied = False
+    options = layout_options(job)
+    if options:
+        layout_path = os.path.join(workdir, "preview.pdf")
+        if pdftopdf_available():
+            transform_for_preview(work, preview_job_options(job), layout_path)
+            work = layout_path
+            layout_applied = True
+        elif (
+            qpdf_fallback  # preview-only: print sends the range to CUPS
+            and job.page_range
+            and validate_page_range(job.page_range)
+            and shutil.which("qpdf")
+        ):
+            # no pdftopdf: at least apply the page selection locally
+            make_page_subset(work, job.page_range, layout_path)
+            work = layout_path
+    if needs_gs_pass(job):
+        margined_path = os.path.join(workdir, "margined.pdf")
+        apply_margins(work, margined_path, job)
+        work = margined_path
+    return work, layout_applied
+
+
 def print_file(path: str, job: PrintJob) -> str:
     """Submit a file to CUPS. Returns the CUPS job id string."""
     if not job.printer:
@@ -575,10 +620,7 @@ def print_file(path: str, job: PrintJob) -> str:
         cmd += ["-o", f"{key}={value}"]
     try:
         with tempfile.TemporaryDirectory(prefix="pdfprinter-") as tmpdir:
-            # apply layout locally (same as the preview), THEN margins, so
-            # mirrored margins follow the final output order — e.g. with
-            # pages 2-5, output page 1 (source page 2) gets the left
-            # margin. lp spools a copy, so the temp files can go after.
+            # lp spools a copy, so the temp files can go after.
             work = path
             # sanitize first: structurally defective PDFs make printer
             # filter chains fail on the device (e.g. Canon error #853);
@@ -588,21 +630,15 @@ def print_file(path: str, job: PrintJob) -> str:
                     work = _repaired_copy(work)
                 except PrintError:
                     pass  # print the original rather than not at all
-            options = layout_options(job)
-            if options and pdftopdf_available():
-                layout_path = os.path.join(tmpdir, "layout.pdf")
-                transform_for_preview(work, " ".join(options), layout_path)
-                work = layout_path
+            # the shared pipeline: layout, then margins (see build_output)
+            work, layout_applied = build_output(work, job, tmpdir, qpdf_fallback=False)
+            if layout_applied:
                 if job.media:  # still selects the paper/tray
                     cmd += ["-o", f"media={job.media}"]
             else:
                 # no local pdftopdf: fall back to server-side options
-                for option in options:
+                for option in layout_options(job):
                     cmd += ["-o", option]
-            if needs_gs_pass(job):
-                margined = os.path.join(tmpdir, "margined.pdf")
-                apply_margins(work, margined, job)
-                work = margined
             # final guard: CUPS runs pdftopdf server-side on every job;
             # if it would fail on our file, the printer receives broken
             # data and errors out (e.g. Canon #853) — check locally and

@@ -3,24 +3,14 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 import tempfile
 
 from PyQt6.QtCore import (
-    QAbstractAnimation,
-    QEasingCurve,
-    QElapsedTimer,
     QEvent,
-    QPoint,
-    QPointF,
-    QRectF,
     QSize,
     Qt,
-    QThread,
     QTimer,
-    QVariantAnimation,
-    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QAction,
@@ -28,8 +18,6 @@ from PyQt6.QtGui import (
     QFontMetrics,
     QIcon,
     QKeySequence,
-    QPainter,
-    QPalette,
     QPixmap,
 )
 from PyQt6.QtPdf import QPdfDocument
@@ -46,7 +34,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPinchGesture,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -1362,16 +1349,20 @@ class MainWindow(QMainWindow):
         self._update_binder_chip(job)
         options = printing.preview_job_options(job)
         has_margins = printing.needs_gs_pass(job)
+        if self._preview_worker is not None and self._preview_worker.isRunning():
+            # A transform is in flight: re-run with fresh options once it
+            # lands. This check comes before the nothing-to-do branch on
+            # purpose — clearing every option mid-render must not return
+            # early, or the stale result would still be loaded when the
+            # worker finishes. The dirty re-run reaches the branch below.
+            self._preview_dirty = True
+            return
         if not options and not has_margins:
             if self._showing_transformed:
                 self._load_preserving_view(self.current_path)
                 self._showing_transformed = False
                 self.statusBar().showMessage("Preview: original document", 3000)
                 QTimer.singleShot(0, self._update_header)
-            return
-        if self._preview_worker is not None and self._preview_worker.isRunning():
-            # a transform is in flight: re-run with fresh options after it
-            self._preview_dirty = True
             return
         if self._subset_dir is None:
             self._subset_dir = tempfile.TemporaryDirectory(prefix="pdfprinter-")
@@ -1381,26 +1372,9 @@ class MainWindow(QMainWindow):
         subset_dir = self._subset_dir.name
 
         def task() -> str:
-            # same order as print_file: layout first, margins on the result
-            work = source
-            if options:
-                preview_path = os.path.join(subset_dir, "preview.pdf")
-                if printing.pdftopdf_available():
-                    printing.transform_for_preview(work, options, preview_path)
-                    work = preview_path
-                elif (
-                    job.page_range
-                    and printing.validate_page_range(job.page_range)
-                    and shutil.which("qpdf")
-                ):
-                    # fallback: at least preview the page selection
-                    printing.make_page_subset(work, job.page_range, preview_path)
-                    work = preview_path
-            if has_margins:
-                margined_path = os.path.join(subset_dir, "margined.pdf")
-                printing.apply_margins(work, margined_path, job)
-                work = margined_path
-            return work
+            # the one shared pipeline, exactly as print_file runs it
+            path, _layout_applied = printing.build_output(source, job, subset_dir)
+            return path
 
         self.statusBar().showMessage("Rendering preview…")
         self._set_rendering(True)
@@ -1424,12 +1398,16 @@ class MainWindow(QMainWindow):
         if self._preview_worker is worker:
             self._preview_worker = None
         worker.deleteLater()
+        # drop the chip before anything else: the dirty re-run may well
+        # decide there is nothing left to render, and the chip would
+        # otherwise stay up; a re-run that does start work turns it back
+        # on in the same event-loop pass, so there is no flicker
+        self._set_rendering(False)
         if self._preview_dirty:
             # options changed while rendering: redo with the fresh state
             self._preview_dirty = False
             self._apply_layout_preview()
             return
-        self._set_rendering(False)
         if error is not None:
             # stays until the next preview succeeds; full text on stderr
             self.statusBar().showMessage(f"Preview failed: {error}")
@@ -1608,16 +1586,37 @@ class MainWindow(QMainWindow):
     def _update_capabilities(self, _text: str | None = None) -> None:
         """Enable/disable and repopulate options for the selected printer."""
         printer = self.printer_combo.currentText()
-        options: dict[str, printing.PPDOption] = {}
-        if printer:
-            if printer not in self._caps_cache:
-                try:
-                    self._caps_cache[printer] = printing.printer_options(printer)
-                except printing.PrintError:
-                    self._caps_cache[printer] = {}
-            options = self._caps_cache[printer]
+        options = self._printer_caps(printer)
+        self._gate_duplex_support(options)
+        self._fill_driver_combos(options)
+        self._apply_driver_defaults(options)
+        self._update_more_button()
+        self.printer_status.setText(f"{printer} · idle" if printer else "")
+        self._refresh_hw_margins(printer)
 
-        # gray out duplex on printers without a duplex unit
+    def _printer_caps(self, printer: str) -> dict[str, printing.PPDOption]:
+        """The printer's PPD options, queried once and cached per printer.
+
+        An unreachable or option-less queue caches as an empty dict, which
+        every caller reads as "the driver reports nothing".
+        """
+        if not printer:
+            return {}
+        if printer not in self._caps_cache:
+            try:
+                self._caps_cache[printer] = printing.printer_options(printer)
+            except printing.PrintError:
+                self._caps_cache[printer] = {}
+        return self._caps_cache[printer]
+
+    def _gate_duplex_support(
+        self, options: dict[str, printing.PPDOption]
+    ) -> None:
+        """Gray out duplex on printers without a duplex unit.
+
+        Unknown capabilities (no options reported) stay enabled rather
+        than locking out a working printer.
+        """
         has_duplex = not options or printing.supports_duplex(options)
         self.duplex_combo.setEnabled(has_duplex)
         tooltip = "" if has_duplex else DUPLEX_UNSUPPORTED
@@ -1630,6 +1629,10 @@ class MainWindow(QMainWindow):
         if not has_duplex:
             self.duplex_combo.setCurrentIndex(0)
 
+    def _fill_driver_combos(
+        self, options: dict[str, printing.PPDOption]
+    ) -> None:
+        """Repopulate the three combos that mirror the driver's own lists."""
         self._fill_ppd_combo(
             self.quality_combo,
             printing.find_option(
@@ -1644,6 +1647,10 @@ class MainWindow(QMainWindow):
             self.mediatype_combo, printing.find_option(options, "mediatype")
         )
 
+    def _apply_driver_defaults(
+        self, options: dict[str, printing.PPDOption]
+    ) -> None:
+        """Fold the driver's Paper and Color defaults into those controls."""
         # mark the printer's default directly on the matching choice
         size_option = printing.find_option(options, "pagesize")
         self._rebuild_static_combo(
@@ -1669,12 +1676,14 @@ class MainWindow(QMainWindow):
             self.color_combo.blockSignals(False)
             self._apply_color_preview()
         self._apply_color_preview()  # the rebuild bypassed the change signal
-        self._update_more_button()
 
-        self.printer_status.setText(f"{printer} · idle" if printer else "")
+    def _refresh_hw_margins(self, printer: str) -> None:
+        """Pick up the printer's unprintable border.
 
-        # the printer's unprintable border: shade it in the preview and
-        # re-place punch-zone content, which keeps out of it
+        It is shaded in the preview and legend, and punch-zone placement
+        keeps content out of it — so a printer switch has to re-run the
+        preview while that mode is selected.
+        """
         self._printer_hw = printing.printer_hw_margins(printer) if printer else None
         self.viewer.set_hw_margins(self._printer_hw)
         self._update_legend()
