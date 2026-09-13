@@ -17,3 +17,6 @@ pdfprinter = "pdfprinter.main:main"
 
 [tool.setuptools.packages.find]
 include = ["pdfprinter*"]
+
+[tool.setuptools.package-data]
+pdfprinter = ["fonts/*"]

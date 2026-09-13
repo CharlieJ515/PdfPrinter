@@ -13,26 +13,34 @@ from PyQt6.QtCore import (
     QElapsedTimer,
     QEvent,
     QPoint,
+    QPointF,
+    QRectF,
+    QSize,
     Qt,
     QThread,
     QTimer,
     QVariantAnimation,
     pyqtSignal,
 )
-from PyQt6.QtCore import QRectF
-from PyQt6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QFontMetrics,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPixmap,
+)
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtPdfWidgets import QPdfView
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QGraphicsColorizeEffect,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -41,29 +49,48 @@ from PyQt6.QtWidgets import (
     QPinchGesture,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
-    QSplitter,
+    QStackedWidget,
     QStatusBar,
-    QTextBrowser,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from . import __version__, printing, zotero
-from .help import HELP_HTML
+from . import printing, theme, zotero
+from .dialogs import (
+    AboutDialog,
+    UserGuideDialog,
+    ZoteroPickerDialog,
+    show_print_error,
+)
+from .widgets import (
+    CollapsibleSection,
+    JobChip,
+    PlacementDiagram,
+    SegmentedControl,
+    Spinner,
+)
 
 DUPLEX_CHOICES = [
     ("One-sided", "one-sided"),
     ("Double-sided (long edge)", "two-sided-long-edge"),
     ("Double-sided (short edge)", "two-sided-short-edge"),
 ]
+#: (short label, value, icon, tooltip) for the segmented "Sides" control
+DUPLEX_SEGMENTS = [
+    ("One", "one-sided", "single", "One-sided"),
+    ("Long", "two-sided-long-edge", "duplex", "Double-sided, flipped on the long edge"),
+    ("Short", "two-sided-short-edge", "duplex", "Double-sided, flipped on the short edge"),
+]
 COLOR_CHOICES = [
     ("Printer default", ""),
     ("Color", "color"),
     ("Grayscale", "monochrome"),
 ]
+#: (label, value) for the segmented "Color" control; index 0 is the
+#: "let the printer decide" entry whose label carries the driver default
+COLOR_SEGMENTS = [("Color", "color"), ("Gray", "monochrome")]
 MEDIA_CHOICES = [
     ("Printer default", ""),
     ("A4", "A4"),
@@ -75,9 +102,13 @@ ORIENTATION_CHOICES = [
     ("Portrait", False),
     ("Landscape", True),
 ]
+ORIENTATION_SEGMENTS = [
+    ("Portrait", False, "portrait"),
+    ("Landscape", True, "landscape"),
+]
 NUP_CHOICES = [("1", 1), ("2", 2), ("4", 4), ("6", 6), ("9", 9), ("16", 16)]
 NUP_LAYOUT_CHOICES = [
-    ("Across, then down (default)", ""),
+    ("Across, then down", ""),
     ("Down, then across", "tblr"),
     ("Right to left", "rltb"),
     ("Bottom up", "btlr"),
@@ -88,18 +119,302 @@ PAGE_SET_CHOICES = [
     ("Even pages only", "even"),
 ]
 SCALING_CHOICES = [
-    ("Automatic (default)", ""),
+    ("Automatic", ""),
     ("Fit to page", "fit"),
     ("Fill page", "fill"),
     ("No scaling", "none"),
     ("Custom", "custom"),
 ]
+#: caption under the placement diagram, keyed by PrintJob.margin_mode
+PLACEMENT_CAPTIONS = {
+    "fit": "Shrink to fit the margin box",
+    "shift": "Content moves; far edge may clip",
+    "hole": (
+        "Ink centred between the punch line and the far edge; sides swap "
+        "on even pages. Margin values ignored."
+    ),
+    "hole-content": (
+        "Like punch-line centring, but measured on the page's real "
+        "content — border rules, edge marks and faint margin "
+        "watermarks are ignored."
+    ),
+    "hole-clip": "Original size; both edges may clip",
+}
+
+DUPLEX_UNSUPPORTED = (
+    "Not supported by this printer — use Page set odd/even to print "
+    "double-sided manually"
+)
+RANGE_HINT = "Ranges like 1-4,7 — the preview follows"
+RANGE_ERROR = "Must look like 1-4,7,10-12 (or 4- to the end)"
+EMPTY_TITLE = "What you see is what prints"
+EMPTY_BODY = (
+    "Open a PDF to preview it through the real print pipeline — page "
+    "ranges, n-up, scaling and binder margins all shown before a sheet "
+    "is used."
+)
+EMPTY_HINT = "…or drop a file anywhere in this window"
 
 ZOOM_STEP = 1.25
 MIN_ZOOM = 0.2
 MAX_ZOOM = 8.0
 SCROLL_MULTIPLIER = 2.0  # touchpad pixel deltas feel too small at 1:1
 WHEEL_STEP_PX = 220  # scroll distance per mouse-wheel notch
+
+LABEL_WIDTH = 78  # the sidebar's label column
+SIDE_PAD = 16  # sidebar gutter (PAD_SECTION minus room for the scrollbar)
+ICON_BUTTON = 30  # square icon-only buttons, CONTROL_HEIGHT tall
+SCROLLBAR_ROOM = 8  # width of the always-on sidebar scrollbar
+
+
+# --------------------------------------------------------------------------
+# small shared helpers
+# --------------------------------------------------------------------------
+
+
+def _repolish(widget: QWidget) -> None:
+    """Re-evaluate the stylesheet after a dynamic property changed."""
+    style = widget.style()
+    if style is not None:
+        style.unpolish(widget)
+        style.polish(widget)
+    widget.update()
+
+
+def _human_size(path: str) -> str:
+    try:
+        size = float(os.path.getsize(path))
+    except OSError:
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024.0 or unit == "GB":
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return ""
+
+
+def _abbrev_dir(path: str) -> str:
+    """The document's directory with $HOME folded back to ``~``."""
+    directory = os.path.dirname(os.path.abspath(path))
+    home = os.path.expanduser("~")
+    if directory == home:
+        return "~"
+    if directory.startswith(home + os.sep):
+        return "~" + directory[len(home) :]
+    return directory
+
+
+def _guide_sample(color: str, width: int = 22, height: int = 10) -> QPixmap:
+    """A tiny dashed rule in a guide colour, for the legend bar."""
+    dpr = 2.0
+    pm = QPixmap(int(width * dpr), int(height * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(theme.guide_pen(color, 2.0))
+    painter.drawLine(
+        QPointF(0.0, height / 2.0), QPointF(float(width), height / 2.0)
+    )
+    painter.end()
+    return pm
+
+
+def _solid_sample(
+    color: str, alpha: float, width: int = 22, height: int = 10
+) -> QPixmap:
+    """A flat translucent swatch — the unprintable border reads as fill."""
+    dpr = 2.0
+    pm = QPixmap(int(width * dpr), int(height * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(theme.qcolor(color, alpha))
+    painter.drawRoundedRect(QRectF(0.0, 1.0, width, height - 2.0), 2.0, 2.0)
+    painter.end()
+    return pm
+
+
+class _ElidedLabel(QLabel):
+    """A QLabel that elides its text instead of forcing the layout wider."""
+
+    def __init__(
+        self,
+        text: str = "",
+        mode: Qt.TextElideMode = Qt.TextElideMode.ElideMiddle,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._full = text
+        self._mode = mode
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._sync()
+
+    def setFullText(self, text: str) -> None:  # noqa: N802 (Qt naming)
+        self._full = text
+        self.setToolTip(text)
+        self._sync()
+
+    def fullText(self) -> str:  # noqa: N802 (Qt naming)
+        return self._full
+
+    def _sync(self) -> None:
+        width = max(60, self.width())
+        super().setText(
+            QFontMetrics(self.font()).elidedText(self._full, self._mode, width)
+        )
+
+    def resizeEvent(self, event):  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._sync()
+
+
+class _Chip(QWidget):
+    """A pill floating over the preview (binder mode / rendering)."""
+
+    HEIGHT = 30
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        theme.styled_panel(self)
+        self.setObjectName("previewChip")
+        self.setFixedHeight(self.HEIGHT)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(12, 0, 13, 0)
+        self._layout.setSpacing(theme.GAP_ICON + 2)
+        self.label = QLabel(self)
+        self.label.setFont(theme.body_font(theme.SMALL_POINT_SIZE))
+        self.set_accent(False)
+
+    def set_accent(self, accent: bool) -> None:
+        border = theme.ACCENT if accent else theme.HAIRLINE_SOLID
+        fill = theme.ACCENT_TINT if accent else theme.CONTROL_FILL
+        ink = theme.ACCENT_TEXT if accent else theme.INK
+        self.setStyleSheet(
+            f"QWidget#previewChip {{ background-color: {fill};"
+            f" border: 1px solid {border};"
+            f" border-radius: {self.HEIGHT // 2}px; }}"
+        )
+        self.label.setStyleSheet(f"color: {ink};")
+
+
+class _GuideOverlay(QWidget):
+    """Screen-only guides painted over — never inside — the viewport.
+
+    The guides are furniture, not content: the grayscale *print* preview
+    (a QGraphicsColorizeEffect on the viewport) must not touch them. So
+    this widget is a sibling of the viewport, parented to the view, with
+    its geometry kept in sync; it is transparent and lets every mouse
+    event through to the view underneath.
+    """
+
+    def __init__(self, view: ZoomablePdfView) -> None:
+        super().__init__(view)
+        self._view = view
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._caption_font = theme.body_font(theme.SMALL_POINT_SIZE)
+
+    def paintEvent(self, event):  # noqa: N802 (Qt naming)
+        view = self._view
+        if (
+            view._margin_guides is None
+            and view._hole_guide_pt is None
+            and view._hw_margins is None
+            and not view._mirror_guides
+        ):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        margin_pen = theme.guide_pen(theme.MARGIN_GUIDE)
+        hole_pen = theme.guide_pen(theme.PUNCH_GUIDE)
+        hw_brush = theme.qcolor(theme.UNPRINTABLE, theme.UNPRINTABLE_ALPHA)
+        caption_color = theme.qcolor(theme.TEXT_FAINT)
+        own_rect = QRectF(self.rect())
+        for index, (rect, scale) in enumerate(view._page_layout()):
+            if not rect.intersects(own_rect):
+                continue
+            if view._hw_margins is not None:
+                # shade what the printer physically cannot print
+                hw_l, hw_b, hw_r, hw_t = (m * scale for m in view._hw_margins)
+                painter.fillRect(
+                    QRectF(rect.left(), rect.top(), hw_l, rect.height()),
+                    hw_brush,
+                )
+                painter.fillRect(
+                    QRectF(rect.right() - hw_r, rect.top(), hw_r, rect.height()),
+                    hw_brush,
+                )
+                painter.fillRect(
+                    QRectF(rect.left() + hw_l, rect.top(),
+                           rect.width() - hw_l - hw_r, hw_t),
+                    hw_brush,
+                )
+                painter.fillRect(
+                    QRectF(rect.left() + hw_l, rect.bottom() - hw_b,
+                           rect.width() - hw_l - hw_r, hw_b),
+                    hw_brush,
+                )
+            even = view._mirror_guides and index % 2 == 1  # even page number
+            if view._margin_guides is not None:
+                left, top, right, bottom = view._margin_guides
+                if even:
+                    left, right = right, left
+                painter.setPen(margin_pen)
+                painter.drawRect(
+                    rect.adjusted(
+                        left * scale, top * scale, -right * scale, -bottom * scale
+                    )
+                )
+            if view._hole_guide_pt is not None:
+                offset = view._hole_guide_pt * scale
+                x = rect.right() - offset if even else rect.left() + offset
+                painter.setPen(hole_pen)
+                painter.drawLine(
+                    QPointF(x, rect.top()), QPointF(x, rect.bottom())
+                )
+            if view._mirror_guides:
+                self._draw_caption(painter, rect, index, even, caption_color)
+        painter.end()
+
+    def _draw_caption(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        index: int,
+        even: bool,
+        color: QColor,
+    ) -> None:
+        """Bottom-corner note telling which edge binds on this sheet."""
+        text = (
+            f"{index + 1} · {'even' if even else 'odd'} · "
+            f"binding {'right' if even else 'left'}"
+        )
+        painter.setPen(color)
+        painter.setFont(self._caption_font)
+        metrics = QFontMetrics(self._caption_font)
+        width = metrics.horizontalAdvance(text) + 4
+        height = metrics.height()
+        y = rect.bottom() - 6 - height
+        x = rect.right() - 10 - width if even else rect.left() + 10
+        painter.drawText(
+            QRectF(x, y, width, height),
+            int(Qt.AlignmentFlag.AlignVCenter)
+            | int(
+                Qt.AlignmentFlag.AlignRight
+                if even
+                else Qt.AlignmentFlag.AlignLeft
+            ),
+            text,
+        )
 
 
 class ZoomablePdfView(QPdfView):
@@ -118,6 +433,21 @@ class ZoomablePdfView(QPdfView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.grabGesture(Qt.GestureType.PinchGesture)
+
+        # the grey behind the paper: QPdfView fills the viewport with the
+        # palette's Dark brush. Never touch setBackgroundRole() here — a
+        # Dark background role makes every child label inherit the Light
+        # foreground role, which paints the floating chips invisible.
+        palette = self.palette()
+        for role in (
+            QPalette.ColorRole.Dark,
+            QPalette.ColorRole.Mid,
+            QPalette.ColorRole.Base,
+            QPalette.ColorRole.Window,
+        ):
+            palette.setColor(role, theme.qcolor(theme.CANVAS))
+        self.setPalette(palette)
+        self.viewport().setPalette(palette)
 
         def _make_anim() -> QVariantAnimation:
             anim = QVariantAnimation(self)
@@ -150,7 +480,39 @@ class ZoomablePdfView(QPdfView):
         # printer's unprintable border (left, bottom, right, top) in pt
         self._hw_margins: tuple[float, float, float, float] | None = None
 
+        # the guides live in their own transparent layer above the
+        # viewport, so the grayscale print simulation (an effect on the
+        # viewport) cannot desaturate them
+        self._guide_overlay = _GuideOverlay(self)
+        self._sync_guide_overlay()
+        self._guide_overlay.show()
+        self.viewport().installEventFilter(self)
+        for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
+            bar.valueChanged.connect(self.update_guides)
+            bar.rangeChanged.connect(self.update_guides)
+        self.zoom_changed.connect(self.update_guides)
+
     # ---------- margin guides ----------
+
+    def update_guides(self, *_args) -> None:
+        """Repaint the guide layer (page geometry or state changed)."""
+        self._guide_overlay.update()
+
+    def _sync_guide_overlay(self) -> None:
+        """Keep the guide layer exactly over the viewport."""
+        self._guide_overlay.setGeometry(self.viewport().geometry())
+
+    def eventFilter(self, watched, event):  # noqa: N802 (Qt naming)
+        if watched is self.viewport() and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.Move,
+        ):
+            self._sync_guide_overlay()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._sync_guide_overlay()
 
     def set_margin_guides(
         self,
@@ -165,11 +527,11 @@ class ZoomablePdfView(QPdfView):
             guides = None
         self._margin_guides = guides
         self._mirror_guides = mirror
-        self.viewport().update()
+        self.update_guides()
 
     def set_hole_guide(self, distance_pt: float | None) -> None:
         self._hole_guide_pt = distance_pt
-        self.viewport().update()
+        self.update_guides()
 
     def set_hw_margins(
         self, margins: tuple[float, float, float, float] | None
@@ -178,7 +540,7 @@ class ZoomablePdfView(QPdfView):
         if margins is not None and not any(margins):
             margins = None
         self._hw_margins = margins
-        self.viewport().update()
+        self.update_guides()
 
     def _page_layout(self) -> list[tuple[QRectF, float]]:
         """Each page's viewport rectangle and its pixels-per-point scale.
@@ -217,64 +579,6 @@ class ZoomablePdfView(QPdfView):
             layout.append((QRectF(x - offset_x, y - offset_y, w, h), scale))
             y += h + spacing
         return layout
-
-    def paintEvent(self, event):  # noqa: N802 (Qt naming)
-        super().paintEvent(event)
-        if (
-            self._margin_guides is None
-            and self._hole_guide_pt is None
-            and self._hw_margins is None
-        ):
-            return
-        painter = QPainter(self.viewport())
-        margin_pen = QPen(QColor(220, 60, 60, 170))
-        margin_pen.setStyle(Qt.PenStyle.DashLine)
-        hole_pen = QPen(QColor(60, 60, 220, 170))
-        hole_pen.setStyle(Qt.PenStyle.DashLine)
-        hw_brush = QColor(120, 120, 120, 50)
-        viewport_rect = QRectF(self.viewport().rect())
-        for index, (rect, scale) in enumerate(self._page_layout()):
-            if not rect.intersects(viewport_rect):
-                continue
-            if self._hw_margins is not None:
-                # shade what the printer physically cannot print
-                hw_l, hw_b, hw_r, hw_t = (m * scale for m in self._hw_margins)
-                painter.fillRect(
-                    QRectF(rect.left(), rect.top(), hw_l, rect.height()),
-                    hw_brush,
-                )
-                painter.fillRect(
-                    QRectF(rect.right() - hw_r, rect.top(), hw_r, rect.height()),
-                    hw_brush,
-                )
-                painter.fillRect(
-                    QRectF(rect.left() + hw_l, rect.top(),
-                           rect.width() - hw_l - hw_r, hw_t),
-                    hw_brush,
-                )
-                painter.fillRect(
-                    QRectF(rect.left() + hw_l, rect.bottom() - hw_b,
-                           rect.width() - hw_l - hw_r, hw_b),
-                    hw_brush,
-                )
-            even = self._mirror_guides and index % 2 == 1  # even page number
-            if self._margin_guides is not None:
-                left, top, right, bottom = self._margin_guides
-                if even:
-                    left, right = right, left
-                painter.setPen(margin_pen)
-                painter.drawRect(
-                    rect.adjusted(
-                        left * scale, top * scale, -right * scale, -bottom * scale
-                    )
-                )
-            if self._hole_guide_pt is not None:
-                offset = self._hole_guide_pt * scale
-                x = rect.right() - offset if even else rect.left() + offset
-                painter.setPen(hole_pen)
-                painter.drawLine(
-                    round(x), round(rect.top()), round(x), round(rect.bottom())
-                )
 
     # ---------- zoom ----------
 
@@ -446,6 +750,87 @@ class ZoomablePdfView(QPdfView):
         self._glide_anim.start()
 
 
+class SuffixSpinBox(QSpinBox):
+    """Spin box whose unit suffix is not editable ground.
+
+    Any click on the field (frame or text) selects the entire text so
+    typing replaces the value. A bare caret can never sit inside the
+    unit suffix; step arrows appear only while the cursor hovers the
+    field.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._clamping = False
+        self.lineEdit().cursorPositionChanged.connect(self._clamp_cursor)
+        self.lineEdit().installEventFilter(self)
+        # plain field at rest; step arrows appear under the cursor
+        self.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        # no blinking caret while the whole value is selected
+        self.lineEdit().setProperty("hideCaretWhenSelected", True)
+        self.lineEdit().selectionChanged.connect(self.lineEdit().update)
+
+    def enterEvent(self, event):  # noqa: N802 (Qt naming)
+        super().enterEvent(event)
+        if self.isEnabled():
+            self.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+
+    def leaveEvent(self, event):  # noqa: N802 (Qt naming)
+        super().leaveEvent(event)
+        self.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+
+    def _cursor_limit(self) -> int:
+        text = self.lineEdit().text()
+        suffix = self.suffix()
+        if suffix and text.endswith(suffix) and (
+            not self.specialValueText() or self.value() != self.minimum()
+        ):
+            return len(text) - len(suffix)
+        return len(text)
+
+    def _clamp_cursor(self, _old: int, new: int) -> None:
+        if self._clamping:
+            return
+        edit = self.lineEdit()
+        if edit.hasSelectedText():
+            return  # selections may span the suffix (select-all)
+        limit = self._cursor_limit()
+        if new > limit:
+            self._clamping = True
+            try:
+                edit.setCursorPosition(limit)
+            finally:
+                self._clamping = False
+
+    def _clamp_now(self) -> None:
+        edit = self.lineEdit()
+        self._clamp_cursor(edit.cursorPosition(), edit.cursorPosition())
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt naming)
+        # clicks and focus land on the child line edit, not on the spin
+        # box itself, so watch them there
+        if obj is self.lineEdit() and event.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.MouseButtonPress,
+        ):
+            QTimer.singleShot(0, self.selectAll)
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event):  # noqa: N802 (Qt naming)
+        # clicks on the frame around the line edit select too
+        super().mousePressEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 (Qt naming)
+        super().stepBy(steps)
+        QTimer.singleShot(0, self._clamp_now)
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt naming)
+        # these fields show no step arrows at rest, so wheel-stepping
+        # would be an invisible affordance; the wheel scrolls the pane
+        event.ignore()
+
+
 class _TransformWorker(QThread):
     """Runs the preview transform pipeline off the GUI thread."""
 
@@ -465,146 +850,35 @@ class _TransformWorker(QThread):
             self.done.emit(None, f"{type(exc).__name__}: {exc}")
 
 
-class ZoteroDialog(QDialog):
-    """Zotero-style picker: collections tree plus title/creator list."""
-
-    def __init__(self, storage_dir: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Open from Zotero")
-        self.resize(900, 520)
-        self.selected_path: str | None = None
-
-        library = zotero.load_library(storage_dir)
-        if library is not None:
-            self._collections, self._items = library
-        else:
-            # metadata unavailable: flat file listing as fallback
-            self._collections = []
-            self._items = [
-                zotero.ZoteroItem(title=name, creators="", path=path, mtime=0)
-                for name, path in zotero.list_pdfs(storage_dir)
-            ]
-        self._children: dict[int | None, list[zotero.ZoteroCollection]] = {}
-        for collection in self._collections:
-            self._children.setdefault(collection.parent, []).append(collection)
-
-        layout = QVBoxLayout(self)
-        self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText(
-            f"Search {len(self._items)} PDFs by title or author…"
-        )
-        self.filter_edit.textChanged.connect(self._repopulate)
-        layout.addWidget(self.filter_edit)
-
-        splitter = QSplitter(self)
-
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        root = QTreeWidgetItem(["My Library"])
-        root.setData(0, Qt.ItemDataRole.UserRole, None)
-        self.tree.addTopLevelItem(root)
-        self._add_collection_items(root, None)
-        root.setExpanded(True)
-        self.tree.setCurrentItem(root)
-        self.tree.currentItemChanged.connect(self._repopulate)
-        splitter.addWidget(self.tree)
-
-        self.list = QTreeWidget()
-        self.list.setHeaderLabels(["Title", "Creator"])
-        self.list.setRootIsDecorated(False)
-        self.list.setColumnWidth(0, 460)
-        self.list.itemDoubleClicked.connect(lambda _item, _col: self.accept())
-        splitter.addWidget(self.list)
-
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        layout.addWidget(splitter, stretch=1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Open
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-        self._repopulate()
-        self.filter_edit.setFocus()
-
-    def _add_collection_items(
-        self, parent_item: QTreeWidgetItem, parent_id: int | None
-    ) -> None:
-        for collection in self._children.get(parent_id, []):
-            item = QTreeWidgetItem([collection.name])
-            item.setData(0, Qt.ItemDataRole.UserRole, collection.id)
-            parent_item.addChild(item)
-            self._add_collection_items(item, collection.id)
-
-    def _selected_collection_ids(self) -> set[int] | None:
-        """The picked collection and its descendants; None means all."""
-        current = self.tree.currentItem()
-        if current is None:
-            return None
-        collection_id = current.data(0, Qt.ItemDataRole.UserRole)
-        if collection_id is None:
-            return None
-        ids = {collection_id}
-        pending = [collection_id]
-        while pending:
-            for child in self._children.get(pending.pop(), []):
-                ids.add(child.id)
-                pending.append(child.id)
-        return ids
-
-    def _repopulate(self, *_args) -> None:
-        tokens = self.filter_edit.text().lower().split()
-        collection_ids = self._selected_collection_ids()
-        self.list.clear()
-        for entry in self._items:
-            if collection_ids is not None and not (
-                entry.collections & collection_ids
-            ):
-                continue
-            haystack = (
-                f"{entry.title} {entry.creators} "
-                f"{os.path.basename(entry.path)}".lower()
-            )
-            if not all(token in haystack for token in tokens):
-                continue
-            item = QTreeWidgetItem([entry.title, entry.creators])
-            item.setData(0, Qt.ItemDataRole.UserRole, entry.path)
-            item.setToolTip(0, entry.path)
-            self.list.addTopLevelItem(item)
-        if self.list.topLevelItemCount():
-            self.list.setCurrentItem(self.list.topLevelItem(0))
-
-    def accept(self) -> None:  # noqa: A003 (Qt naming)
-        item = self.list.currentItem()
-        if item is not None:
-            self.selected_path = item.data(0, Qt.ItemDataRole.UserRole)
-        super().accept()
-
-
 class MainWindow(QMainWindow):
     def __init__(self, pdf_path: str | None = None):
         super().__init__()
         self.setWindowTitle("PDF Printer")
-        self.resize(1000, 700)
+        self.resize(1180, 780)
         self.setAcceptDrops(True)
 
         self.document = QPdfDocument(self)
         self.current_path: str | None = None
+        self._source_pages = 0  # page count of the ORIGINAL document
         self._subset_dir: tempfile.TemporaryDirectory | None = None
         self._showing_transformed = False
-        self._zotero_dialog: ZoteroDialog | None = None
+        self._zotero_dialog: ZoteroPickerDialog | None = None
         self._preview_worker: _TransformWorker | None = None
         self._preview_dirty = False
+        self._printer_restored = False
         self._print_worker: _TransformWorker | None = None
+        self._print_stage = "idle"
+        self._color_default: str | None = None
+        self._color_user_set = False
+        self._printer_hw: tuple[float, float, float, float] | None = None
         self._tracked_job: str | None = None
         self._track_polls = 0
         self._job_timer = QTimer(self)
         self._job_timer.setInterval(2000)
         self._job_timer.timeout.connect(self._poll_job)
+        self._chip_timer = QTimer(self)
+        self._chip_timer.setSingleShot(True)
+        self._chip_timer.timeout.connect(lambda: self.job_chip.hide())
 
         self._build_ui()
         self._build_menu()
@@ -612,122 +886,582 @@ class MainWindow(QMainWindow):
         if pdf_path:
             self.load_pdf(pdf_path)
 
+    # ---------- UI construction: shared pieces ----------
+
+    @staticmethod
+    def _section_header(text: str, rule: bool = True) -> QWidget:
+        """A SECTION LABEL, optionally trailed by a hairline rule."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.GAP_CONTROL)
+        layout.addWidget(theme.style_section_label(QLabel(text)), 0)
+        if rule:
+            line = QWidget()
+            line.setObjectName("chipSep")
+            theme.styled_panel(line)
+            line.setFixedHeight(1)
+            line.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            layout.addWidget(line, 1, Qt.AlignmentFlag.AlignVCenter)
+        else:
+            layout.addStretch(1)
+        return widget
+
+    @staticmethod
+    def _combo(tooltip: str = "", chars: int = 6) -> QComboBox:
+        """A sidebar combo that may shrink below its longest entry."""
+        combo = QComboBox()
+        combo.setMinimumHeight(theme.CONTROL_HEIGHT)
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        combo.setMinimumContentsLength(chars)
+        combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        if tooltip:
+            combo.setToolTip(tooltip)
+        return combo
+
+    @staticmethod
+    def _icon_button(
+        name: str, tooltip: str, size: int = ICON_BUTTON
+    ) -> QPushButton:
+        button = QPushButton()
+        button.setIcon(theme.icon(name, theme.INK, 15))
+        button.setIconSize(QSize(15, 15))
+        button.setFixedSize(size, size)
+        button.setToolTip(tooltip)
+        button.setStyleSheet("padding: 0px;")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        return button
+
+    def _row(
+        self, text: str, *widgets, label_width: int = LABEL_WIDTH
+    ) -> tuple[QHBoxLayout, QLabel]:
+        """One ``Label   [control…]`` line of the sidebar."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(theme.GAP_CONTROL)
+        label = QLabel(text)
+        label.setFont(theme.body_font())
+        label.setFixedWidth(label_width)
+        row.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
+        for widget, stretch in widgets:
+            row.addWidget(widget, stretch, Qt.AlignmentFlag.AlignVCenter)
+        return row, label
+
     # ---------- UI construction ----------
 
     def _build_ui(self) -> None:
+        self.zotero_storage = zotero.find_storage_dir()
+
+        central = QWidget(self)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._build_header())
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self._build_preview_column(), 1)
+        body.addWidget(self._build_sidebar(), 0)
+        outer.addLayout(body, 1)
+        self.setCentralWidget(central)
+
+        self._build_status_bar()
+        self._connect_signals()
+        self._update_header()
+        self._update_placement_diagram()
+        self._set_print_stage("idle")
+        self.refresh_printers()
+        self._refresh_last_tooltip()
+
+    # ----- header bar -----
+
+    def _build_header(self) -> QWidget:
+        bar = theme.styled_panel(QWidget(self))
+        bar.setObjectName("headerBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(theme.PAD_SECTION, 10, theme.PAD_SECTION, 10)
+        layout.setSpacing(theme.GAP_CONTROL + 3)
+
+        title = QLabel("PDF Printer")
+        title.setFont(theme.serif_font(16.0))
+        layout.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFixedHeight(28)
+        layout.addWidget(separator, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.header_icon = QLabel()
+        self.header_icon.setPixmap(theme.pixmap("doc", theme.TEXT_MUTED, 16))
+        self.header_icon.setFixedWidth(16)
+        layout.addWidget(self.header_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(1)
+        self.header_name = _ElidedLabel("No document")
+        self.header_name.setFont(theme.body_font())
+        self.header_meta = _ElidedLabel("", Qt.TextElideMode.ElideMiddle)
+        self.header_meta.setObjectName("metaLabel")
+        self.header_meta.setFont(theme.body_font(theme.SMALL_POINT_SIZE))
+        column.addWidget(self.header_name)
+        column.addWidget(self.header_meta)
+        layout.addLayout(column, 1)
+
+        self.open_button = QPushButton(" Open PDF…")
+        self.open_button.setIcon(theme.icon("open", theme.INK, 15))
+        self.open_button.setIconSize(QSize(15, 15))
+        self.open_button.setMinimumHeight(theme.CONTROL_HEIGHT)
+        self.open_button.clicked.connect(self.open_dialog)
+        layout.addWidget(self.open_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.zotero_button = QPushButton(" Zotero")
+        self.zotero_button.setIcon(theme.icon("zotero", theme.INK, 15))
+        self.zotero_button.setIconSize(QSize(15, 15))
+        self.zotero_button.setMinimumHeight(theme.CONTROL_HEIGHT)
+        self.zotero_button.setToolTip("Open a PDF from the Zotero library")
+        self.zotero_button.clicked.connect(self.open_zotero_dialog)
+        self.zotero_button.setVisible(bool(self.zotero_storage))
+        layout.addWidget(self.zotero_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        return bar
+
+    # ----- preview column -----
+
+    def _build_preview_column(self) -> QWidget:
+        column = QWidget(self)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
         self.viewer = ZoomablePdfView(self)
         self.viewer.setDocument(self.document)
         self.viewer.setPageMode(QPdfView.PageMode.MultiPage)
         self.viewer.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self.viewer.setFrameShape(QFrame.Shape.NoFrame)
         self.viewer.zoom_changed.connect(self._on_zoom_changed)
 
-        zoom_bar = QHBoxLayout()
-        zoom_out_button = QPushButton("−")
-        zoom_out_button.setFixedWidth(36)
-        zoom_out_button.setToolTip("Zoom out (Ctrl+-, Ctrl+scroll)")
-        zoom_out_button.clicked.connect(self.zoom_out)
-        zoom_in_button = QPushButton("+")
-        zoom_in_button.setFixedWidth(36)
-        zoom_in_button.setToolTip("Zoom in (Ctrl++, Ctrl+scroll)")
-        zoom_in_button.clicked.connect(self.zoom_in)
-        fit_button = QPushButton("Fit width")
-        fit_button.setToolTip("Fit page to window width (Ctrl+0)")
-        fit_button.clicked.connect(self.fit_width)
-        zoom_bar.addWidget(zoom_out_button)
-        zoom_bar.addWidget(zoom_in_button)
-        zoom_bar.addWidget(fit_button)
-        zoom_bar.addStretch(1)
+        self.preview_stack = QStackedWidget(self)
+        self.preview_stack.addWidget(self._build_empty_state())
+        self.preview_stack.addWidget(self.viewer)
+        layout.addWidget(self.preview_stack, 1)
 
-        viewer_column = QVBoxLayout()
-        viewer_column.addLayout(zoom_bar)
-        viewer_column.addWidget(self.viewer, stretch=1)
+        self._build_overlays()
+        self.viewer.installEventFilter(self)
 
-        side = QWidget(self)
-        side.setFixedWidth(300)
-        side_layout = QVBoxLayout(side)
+        self.legend_bar = self._build_legend()
+        self.legend_bar.setVisible(False)
+        layout.addWidget(self.legend_bar, 0)
+        return column
 
-        open_button = QPushButton("Open PDF…")
+    def _build_empty_state(self) -> QWidget:
+        page = theme.styled_panel(QWidget(self))
+        page.setObjectName("emptyPage")
+        page.setStyleSheet(
+            f"QWidget#emptyPage {{ background-color: {theme.CANVAS}; }}"
+        )
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(24, 24, 24, 24)
+
+        card = QFrame()
+        card.setObjectName("emptyCard")
+        card.setMaximumWidth(520)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(40, 38, 40, 34)
+        layout.setSpacing(0)
+
+        mark = QLabel()
+        mark.setPixmap(theme.pixmap("doc-plus", theme.ACCENT, 34))
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(mark)
+        layout.addSpacing(18)
+
+        title = QLabel(EMPTY_TITLE)
+        title.setFont(theme.serif_font(22.0))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addSpacing(14)
+
+        body = QLabel(EMPTY_BODY)
+        body.setFont(theme.body_font())
+        body.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setWordWrap(True)
+        layout.addWidget(body)
+        layout.addSpacing(24)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(theme.GAP_CONTROL + 3)
+        buttons.addStretch(1)
+        open_button = QPushButton(" Open PDF…")
+        open_button.setIcon(theme.icon("open", theme.ACCENT_TEXT, 15))
+        open_button.setIconSize(QSize(15, 15))
+        open_button.setMinimumHeight(34)
+        open_button.setStyleSheet(
+            f"QPushButton {{ border: 1px solid {theme.ACCENT};"
+            f" color: {theme.ACCENT_TEXT}; padding: 0px 18px; }}"
+        )
         open_button.clicked.connect(self.open_dialog)
-        side_layout.addWidget(open_button)
+        buttons.addWidget(open_button)
+        self.empty_zotero_button = QPushButton(" Open from Zotero…")
+        self.empty_zotero_button.setIcon(theme.icon("zotero", theme.INK, 15))
+        self.empty_zotero_button.setIconSize(QSize(15, 15))
+        self.empty_zotero_button.setMinimumHeight(34)
+        self.empty_zotero_button.setStyleSheet("padding: 0px 18px;")
+        self.empty_zotero_button.clicked.connect(self.open_zotero_dialog)
+        self.empty_zotero_button.setVisible(bool(self.zotero_storage))
+        buttons.addWidget(self.empty_zotero_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        layout.addSpacing(20)
 
-        self.zotero_storage = zotero.find_storage_dir()
-        if self.zotero_storage:
-            zotero_button = QPushButton("Open from Zotero…")
-            zotero_button.clicked.connect(self.open_zotero_dialog)
-            side_layout.addWidget(zotero_button)
+        hint = QLabel(EMPTY_HINT)
+        hint_font = theme.body_font(theme.SMALL_POINT_SIZE)
+        hint_font.setItalic(True)
+        hint.setFont(hint_font)
+        hint.setStyleSheet(f"color: {theme.TEXT_FAINT};")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
 
-        self.file_label = QLabel("No file loaded")
-        self.file_label.setWordWrap(True)
-        side_layout.addWidget(self.file_label)
+        outer.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(card)
+        row.addStretch(1)
+        outer.addLayout(row)
+        outer.addStretch(1)
+        return page
 
-        options = QGroupBox("Print options")
-        form = QFormLayout(options)
+    def _build_overlays(self) -> None:
+        """The zoom pill and the two chips floating over the preview."""
+        pill = QFrame(self.viewer)
+        pill.setObjectName("pillToolbar")
+        pill.setFixedHeight(38)  # == 2 × the stylesheet's 19 px radius
+        layout = QHBoxLayout(pill)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
 
-        self.printer_combo = QComboBox()
-        form.addRow("Printer", self.printer_combo)
+        zoom_out = QPushButton()
+        zoom_out.setIcon(theme.icon("zoom-out", theme.INK, 14))
+        zoom_out.setIconSize(QSize(14, 14))
+        zoom_out.setToolTip("Zoom out (Ctrl+-, Ctrl+scroll)")
+        zoom_out.clicked.connect(self.zoom_out)
+        layout.addWidget(zoom_out)
 
-        refresh_button = QPushButton("Refresh printers")
+        self.zoom_pill_label = QLabel("Fit")
+        self.zoom_pill_label.setFont(theme.body_font(tabular=True))
+        self.zoom_pill_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_pill_label.setMinimumWidth(46)
+        layout.addWidget(self.zoom_pill_label)
+
+        zoom_in = QPushButton()
+        zoom_in.setIcon(theme.icon("zoom-in", theme.INK, 14))
+        zoom_in.setIconSize(QSize(14, 14))
+        zoom_in.setToolTip("Zoom in (Ctrl++, Ctrl+scroll)")
+        zoom_in.clicked.connect(self.zoom_in)
+        layout.addWidget(zoom_in)
+
+        separator = QWidget()
+        separator.setObjectName("chipSep")
+        theme.styled_panel(separator)
+        separator.setFixedWidth(1)
+        separator.setFixedHeight(18)
+        layout.addWidget(separator)
+
+        fit_button = QPushButton(" Fit width")
+        fit_button.setIcon(theme.icon("fit-width", theme.ACCENT_TEXT, 14))
+        fit_button.setIconSize(QSize(14, 14))
+        fit_button.setToolTip("Fit page to window width (Ctrl+0)")
+        fit_button.setStyleSheet(f"color: {theme.ACCENT_TEXT};")
+        fit_button.clicked.connect(self.fit_width)
+        layout.addWidget(fit_button)
+        self.zoom_pill = pill
+
+        self.binder_chip = _Chip(self.viewer)
+        self.binder_chip.icon_label = QLabel(self.binder_chip)
+        self.binder_chip.icon_label.setPixmap(
+            theme.pixmap("mirror", theme.ACCENT_TEXT, 14)
+        )
+        self.binder_chip._layout.addWidget(self.binder_chip.icon_label)
+        self.binder_chip._layout.addWidget(self.binder_chip.label)
+        self.binder_chip.set_accent(True)
+        self.binder_chip.hide()
+
+        self.render_chip = _Chip(self.viewer)
+        self.render_chip.spinner = Spinner(13, theme.TEXT_MUTED, self.render_chip)
+        self.render_chip._layout.addWidget(self.render_chip.spinner)
+        self.render_chip._layout.addWidget(self.render_chip.label)
+        self.render_chip.label.setText("Rendering preview…")
+        self.render_chip.hide()
+
+        # bottom-right "current / total" page indicator
+        self.page_chip = _Chip(self.viewer)
+        self.page_chip._layout.addWidget(self.page_chip.label)
+        self.page_chip.label.setFont(theme.body_font(tabular=True))
+        self.page_chip.hide()
+
+    def _build_legend(self) -> QWidget:
+        bar = theme.styled_panel(QWidget(self))
+        bar.setObjectName("legendBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(theme.PAD_SECTION, 7, theme.PAD_SECTION, 7)
+        layout.setSpacing(theme.GAP_CONTROL + 9)
+        layout.addWidget(
+            theme.style_section_label(QLabel("SCREEN GUIDES")),
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        def item(pix: QPixmap) -> tuple[QWidget, QLabel]:
+            widget = QWidget()
+            row = QHBoxLayout(widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(theme.GAP_ICON + 2)
+            mark = QLabel()
+            mark.setPixmap(pix)
+            row.addWidget(mark, 0, Qt.AlignmentFlag.AlignVCenter)
+            text = QLabel()
+            text.setFont(theme.body_font(theme.SMALL_POINT_SIZE, tabular=True))
+            row.addWidget(text, 0, Qt.AlignmentFlag.AlignVCenter)
+            layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+            return widget, text
+
+        self.legend_margins, self.legend_margins_text = item(
+            _guide_sample(theme.MARGIN_GUIDE)
+        )
+        self.legend_punch, self.legend_punch_text = item(
+            _guide_sample(theme.PUNCH_GUIDE)
+        )
+        self.legend_hw, self.legend_hw_text = item(
+            _solid_sample(theme.UNPRINTABLE, 0.45)
+        )
+        layout.addStretch(1)
+
+        never = QLabel("Never printed")
+        never_font = theme.body_font(theme.SMALL_POINT_SIZE)
+        never_font.setItalic(True)
+        never.setFont(never_font)
+        never.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        layout.addWidget(never, 0, Qt.AlignmentFlag.AlignVCenter)
+        return bar
+
+    # ----- sidebar -----
+
+    def _build_sidebar(self) -> QWidget:
+        side = QWidget()
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(
+            SIDE_PAD, theme.PAD_SECTION, SIDE_PAD, theme.PAD_SECTION
+        )
+        side_layout.setSpacing(theme.GAP_CONTROL)
+
+        self._build_print_section(side_layout)
+        side_layout.addSpacing(theme.GAP_GROUP - theme.GAP_CONTROL)
+        self._build_more_section(side_layout)
+        side_layout.addSpacing(theme.GAP_GROUP - theme.GAP_CONTROL)
+        self._build_margins_section(side_layout)
+        side_layout.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidget(side)
+        scroll.setWidgetResizable(True)
+        # the scrollbar is always reserved so the viewport width never
+        # changes: no control reflow when it appears, and the content
+        # always fits exactly (no sideways panning)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        column = theme.styled_panel(QWidget(self))
+        column.setObjectName("sidebar")
+        column.setStyleSheet(
+            f"QWidget#sidebar {{ background-color: {theme.GROUND};"
+            f" border-left: 1px solid {theme.HAIRLINE_SOFT}; }}"
+        )
+        column.setFixedWidth(theme.SIDEBAR_WIDTH)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(scroll, 1)
+
+        rule = QFrame()
+        rule.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(rule)
+        layout.addWidget(self._build_actions())
+        return column
+
+    def _build_print_section(self, side_layout: QVBoxLayout) -> None:
+        side_layout.addWidget(self._section_header("PRINT", rule=False))
+
+        # this section's labels are all short; a column sized for the
+        # longest of them keeps the controls close instead of inheriting
+        # the wider column the other sections need
+        metrics = QFontMetrics(theme.body_font())
+        print_label_w = (
+            max(
+                metrics.horizontalAdvance(t)
+                for t in ("Printer", "Copies", "Pages", "Sides", "Color")
+            )
+            + 4
+        )
+
+        self.printer_combo = self._combo("The CUPS queue the job goes to", 8)
+        refresh_button = self._icon_button("refresh", "Refresh the printer list")
         refresh_button.clicked.connect(self.refresh_printers)
-        form.addRow("", refresh_button)
+        row, _ = self._row(
+            "Printer", (self.printer_combo, 1), (refresh_button, 0),
+            label_width=print_label_w,
+        )
+        side_layout.addLayout(row)
 
         self.copies_spin = QSpinBox()
         self.copies_spin.setToolTip("Number of copies to print")
         self.copies_spin.setRange(1, 999)
-        form.addRow("Copies", self.copies_spin)
+        self.copies_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.copies_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.copies_spin.setFixedWidth(60)
+        self.copies_spin.setFixedHeight(theme.CONTROL_HEIGHT)
+        self.copies_spin.setStyleSheet(
+            "QSpinBox { border-radius: 0px; padding: 0px 4px; }"
+        )
+        minus = QPushButton()
+        minus.setObjectName("segment")
+        minus.setProperty("edge", "first")
+        minus.setIcon(theme.icon("zoom-out", theme.INK, 13))
+        minus.setIconSize(QSize(13, 13))
+        minus.setFixedSize(ICON_BUTTON, theme.CONTROL_HEIGHT)
+        minus.setToolTip("One copy fewer")
+        minus.clicked.connect(self.copies_spin.stepDown)
+        plus = QPushButton()
+        plus.setObjectName("segment")
+        plus.setProperty("edge", "last")
+        plus.setIcon(theme.icon("zoom-in", theme.INK, 13))
+        plus.setIconSize(QSize(13, 13))
+        plus.setFixedSize(ICON_BUTTON, theme.CONTROL_HEIGHT)
+        plus.setToolTip("One copy more")
+        plus.clicked.connect(self.copies_spin.stepUp)
+        stepper = QWidget()
+        stepper_layout = QHBoxLayout(stepper)
+        stepper_layout.setContentsMargins(0, 0, 0, 0)
+        stepper_layout.setSpacing(-1)  # the three parts share their border
+        stepper_layout.addWidget(minus)
+        stepper_layout.addWidget(self.copies_spin)
+        stepper_layout.addWidget(plus)
+        stepper.setFixedWidth(ICON_BUTTON * 2 + 60 - 2)
+        row, _ = self._row("Copies", (stepper, 0), label_width=print_label_w)
+        row.addStretch(1)
+        side_layout.addLayout(row)
 
         self.range_edit = QLineEdit()
         self.range_edit.setToolTip(
             "Pages to print, e.g. 1-4,7 — the preview shows the selection"
         )
-        self.range_edit.setPlaceholderText("All pages (e.g. 1-4,7)")
-        form.addRow("Pages", self.range_edit)
+        self.range_edit.setPlaceholderText("All pages")
+        self.range_edit.setMinimumHeight(theme.CONTROL_HEIGHT)
+        self.range_edit.setFont(theme.body_font(tabular=True))
+        row, _ = self._row("Pages", (self.range_edit, 1), label_width=print_label_w)
+        side_layout.addLayout(row)
 
-        self.duplex_combo = QComboBox()
-        for label, value in DUPLEX_CHOICES:
-            self.duplex_combo.addItem(label, value)
-        form.addRow("Duplex", self.duplex_combo)
+        self.range_hint = theme.style_hint(QLabel(RANGE_HINT))
+        self.range_hint.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.range_error = QWidget()
+        error_row = QHBoxLayout(self.range_error)
+        error_row.setContentsMargins(0, 0, 0, 0)
+        error_row.setSpacing(theme.GAP_ICON + 1)
+        error_mark = QLabel()
+        error_mark.setPixmap(theme.pixmap("alert", theme.ERROR, 13))
+        error_row.addWidget(error_mark, 0, Qt.AlignmentFlag.AlignVCenter)
+        error_row.addWidget(
+            theme.style_error(QLabel(RANGE_ERROR)), 0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        error_row.addStretch(1)
+        self.range_error.setVisible(False)
+        hint_holder = QHBoxLayout()
+        hint_holder.setContentsMargins(0, 0, 0, 0)
+        hint_holder.setSpacing(0)
+        hint_holder.addSpacing(print_label_w + theme.GAP_CONTROL)
+        hint_holder.addWidget(self.range_hint, 1)
+        hint_holder.addWidget(self.range_error, 1)
+        side_layout.addLayout(hint_holder)
 
-        self.color_combo = QComboBox()
+        self.duplex_combo = SegmentedControl()
+        # the sidebar is narrow: trim the segment padding so three
+        # segments plus the label column still fit without clipping
+        self.duplex_combo.setStyleSheet(
+            "QPushButton#segment { padding: 0px 7px; }"
+        )
+        for label, value, icon_name, tip in DUPLEX_SEGMENTS:
+            button = self.duplex_combo.addItem(
+                label, value, theme.icon(icon_name, theme.INK, 14)
+            )
+            button.setToolTip(tip)
+        self.duplex_info = QLabel()
+        self.duplex_info.setPixmap(theme.pixmap("info", theme.TEXT_MUTED, 15))
+        self.duplex_info.setFixedWidth(15)
+        self.duplex_info.setVisible(False)
+        row, self.duplex_label = self._row(
+            "Sides", (self.duplex_combo, 1), (self.duplex_info, 0),
+            label_width=print_label_w,
+        )
+        side_layout.addLayout(row)
+
+        self.color_combo = SegmentedControl()
+        self.color_combo.setStyleSheet(
+            "QPushButton#segment { padding: 0px 6px; }"
+        )
+        for label, value in COLOR_SEGMENTS:
+            self.color_combo.addItem(label, value)
+        for idx in range(self.color_combo.count()):
+            self.color_combo.button(idx).clicked.connect(
+                self._mark_color_user_set
+            )
         self.color_combo.setToolTip(
             "Color or grayscale output; grayscale is previewed too"
         )
-        for label, value in COLOR_CHOICES:
-            self.color_combo.addItem(label, value)
-        self.color_combo.currentIndexChanged.connect(self._apply_color_preview)
-        form.addRow("Color", self.color_combo)
+        row, _ = self._row("Color", (self.color_combo, 1), label_width=print_label_w)
+        side_layout.addLayout(row)
 
-        side_layout.addWidget(options)
+    def _build_more_section(self, side_layout: QVBoxLayout) -> None:
+        self.more_group = QWidget()
+        form = QVBoxLayout(self.more_group)
+        form.setContentsMargins(0, theme.GAP_ICON, 0, 0)
+        form.setSpacing(theme.GAP_CONTROL)
 
-        self.more_button = QPushButton("Show more options")
-        self.more_button.setCheckable(True)
-        self.more_button.toggled.connect(self._toggle_more_options)
-        side_layout.addWidget(self.more_button)
-
-        self.more_group = QGroupBox("More options")
-        self.more_group.setVisible(False)
-        more_form = QFormLayout(self.more_group)
-        form = more_form  # the remaining rows are the advanced ones
-
-        self.media_combo = QComboBox()
+        self.media_combo = self._combo("Paper size sent to the printer")
         for label, value in MEDIA_CHOICES:
             self.media_combo.addItem(label, value)
-        form.addRow("Paper", self.media_combo)
+        row, _ = self._row("Paper", (self.media_combo, 1))
+        form.addLayout(row)
 
-        self.orientation_combo = QComboBox()
+        self.orientation_combo = SegmentedControl()
+        self.orientation_combo.setStyleSheet(
+            "QPushButton#segment { padding: 0px 7px; }"
+        )
+        for label, value, icon_name in ORIENTATION_SEGMENTS:
+            self.orientation_combo.addItem(
+                label, value, theme.icon(icon_name, theme.INK, 14)
+            )
         self.orientation_combo.setToolTip("Rotate the layout to landscape")
-        for label, value in ORIENTATION_CHOICES:
-            self.orientation_combo.addItem(label, value)
-        form.addRow("Orientation", self.orientation_combo)
+        row, _ = self._row("Orientation", (self.orientation_combo, 1))
+        form.addLayout(row)
 
-        self.nup_combo = QComboBox()
-        self.nup_combo.setToolTip("Print several pages on each sheet")
+        self.nup_combo = self._combo("Print several pages on each sheet", 2)
         for label, value in NUP_CHOICES:
             self.nup_combo.addItem(label, value)
-        form.addRow("Pages/sheet", self.nup_combo)
-
-        self.nup_layout_combo = QComboBox()
-        self.nup_layout_combo.setToolTip(
-            "Order in which pages fill the sheet (pages/sheet > 1)"
+        self.nup_layout_combo = self._combo(
+            "Order in which pages fill the sheet (pages/sheet > 1)", 8
         )
         for label, value in NUP_LAYOUT_CHOICES:
             self.nup_layout_combo.addItem(label, value)
@@ -737,30 +1471,39 @@ class MainWindow(QMainWindow):
                 self.nup_combo.currentData() > 1
             )
         )
-        form.addRow("N-up order", self.nup_layout_combo)
+        self.nup_combo.setFixedWidth(66)
+        row, _ = self._row(
+            "Pages/sheet", (self.nup_combo, 0), (self.nup_layout_combo, 1)
+        )
+        form.addLayout(row)
 
         # per-printer options, filled by _update_capabilities
-        self.quality_combo = QComboBox()
-        form.addRow("Quality", self.quality_combo)
-        self.source_combo = QComboBox()
-        form.addRow("Paper source", self.source_combo)
-        self.mediatype_combo = QComboBox()
-        form.addRow("Media type", self.mediatype_combo)
+        self.quality_combo = self._combo()
+        row, _ = self._row("Quality", (self.quality_combo, 1))
+        form.addLayout(row)
+        self.source_combo = self._combo()
+        row, _ = self._row("Paper source", (self.source_combo, 1))
+        form.addLayout(row)
+        self.mediatype_combo = self._combo()
+        row, _ = self._row("Media type", (self.mediatype_combo, 1))
+        form.addLayout(row)
 
-        self.scaling_combo = QComboBox()
-        self.scaling_combo.setToolTip(
+        self.scaling_combo = self._combo(
             "How content is scaled to the paper; Custom enables the\n"
-            "percentage below"
+            "percentage beside it"
         )
         for label, value in SCALING_CHOICES:
             self.scaling_combo.addItem(label, value)
-        form.addRow("Scaling", self.scaling_combo)
-
-        self.scale_spin = QSpinBox()
+        self.scale_spin = SuffixSpinBox()
         self.scale_spin.setRange(25, 400)
         self.scale_spin.setSuffix(" %")
         self.scale_spin.setValue(100)
         self.scale_spin.setEnabled(False)  # only with Scaling = Custom
+        self.scale_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.scale_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.scale_spin.setFixedWidth(74)
+        self.scale_spin.setMinimumHeight(theme.CONTROL_HEIGHT)
+        self.scale_spin.setFont(theme.body_font(tabular=True))
         self.scale_spin.setToolTip(
             "Content scale for Scaling = Custom, centered on the page "
             "(and inside the margins when set)"
@@ -770,18 +1513,20 @@ class MainWindow(QMainWindow):
                 self.scaling_combo.currentData() == "custom"
             )
         )
-        form.addRow("Scale", self.scale_spin)
+        row, _ = self._row("Scaling", (self.scaling_combo, 1), (self.scale_spin, 0))
+        form.addLayout(row)
 
-        self.pageset_combo = QComboBox()
-        self.pageset_combo.setToolTip(
+        self.pageset_combo = self._combo(
             "Print only odd or even pages — for manual double-sided\n"
             "printing: print odd, re-feed the stack, print even"
         )
         for label, value in PAGE_SET_CHOICES:
             self.pageset_combo.addItem(label, value)
-        form.addRow("Page set", self.pageset_combo)
+        row, _ = self._row("Page set", (self.pageset_combo, 1))
+        form.addLayout(row)
 
         self.collate_check = QCheckBox("Collate copies")
+        self.collate_check.setFont(theme.body_font())
         self.collate_check.setToolTip(
             "Print complete sets (1,2,3 / 1,2,3) instead of page groups"
         )
@@ -789,16 +1534,29 @@ class MainWindow(QMainWindow):
         self.copies_spin.valueChanged.connect(
             lambda v: self.collate_check.setEnabled(v > 1)
         )
-        form.addRow("", self.collate_check)
-
         self.reverse_check = QCheckBox("Reverse order")
+        self.reverse_check.setFont(theme.body_font())
         self.reverse_check.setToolTip("Print the last page first")
-        form.addRow("", self.reverse_check)
+        for check in (self.collate_check, self.reverse_check):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addSpacing(LABEL_WIDTH + theme.GAP_CONTROL)
+            row.addWidget(check, 1)
+            form.addLayout(row)
 
-        side_layout.addWidget(self.more_group)
+        self.more_section = CollapsibleSection("MORE OPTIONS")
+        self.more_section.setContentWidget(self.more_group)
+        self.more_section.toggled.connect(self._toggle_more_options)
+        #: kept for callers that used the old push button
+        self.more_button = self.more_section.header
+        side_layout.addWidget(self.more_section)
 
-        margins_group = QGroupBox("Margins (mm)")
-        margins_form = QFormLayout(margins_group)
+    def _build_margins_section(self, side_layout: QVBoxLayout) -> None:
+        side_layout.addWidget(self._section_header("MARGINS & BINDING"))
+
+        fields = QVBoxLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(theme.GAP_CONTROL)
         self.margin_spins: dict[str, QSpinBox] = {}
         for key, label in (
             ("left", "Left"),
@@ -806,20 +1564,58 @@ class MainWindow(QMainWindow):
             ("top", "Top"),
             ("bottom", "Bottom"),
         ):
-            spin = QSpinBox()
+            spin = SuffixSpinBox()
             spin.setRange(0, 50)
             spin.setSuffix(" mm")
             spin.setSpecialValueText("Default")
+            spin.setMinimumHeight(theme.CONTROL_HEIGHT)
+            # the artboards show plain fields; arrows/wheel still work
+            spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+            spin.setFont(theme.body_font(tabular=True))
             spin.setToolTip(
                 "Minimum distance from the paper edge; the content is "
                 "scaled to fit inside the margins"
             )
             self.margin_spins[key] = spin
-            margins_form.addRow(label, spin)
-        self.placement_combo = QComboBox()
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(theme.GAP_CONTROL)
+            text = QLabel(label)
+            text.setFont(theme.body_font())
+            text.setFixedWidth(52)
+            row.addWidget(text, 0, Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(spin, 1, Qt.AlignmentFlag.AlignVCenter)
+            fields.addLayout(row)
+        fields.addStretch(1)
+
+        self.placement_diagram = PlacementDiagram("fit", False)
+        self.placement_caption = theme.style_hint(QLabel(PLACEMENT_CAPTIONS["fit"]))
+        self.placement_caption.setWordWrap(True)
+        self.placement_caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.placement_caption.setFixedWidth(134)
+        diagram_column = QVBoxLayout()
+        diagram_column.setContentsMargins(0, 0, 0, 0)
+        diagram_column.setSpacing(theme.GAP_ICON + 1)
+        diagram_column.addWidget(
+            self.placement_diagram, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+        diagram_column.addWidget(self.placement_caption, 0)
+        diagram_column.addStretch(1)
+
+        block = QHBoxLayout()
+        block.setContentsMargins(0, 0, 0, 0)
+        block.setSpacing(theme.GAP_CONTROL + 3)
+        block.addLayout(fields, 1)
+        block.addLayout(diagram_column, 0)
+        side_layout.addLayout(block)
+
+        self.placement_combo = self._combo()
         self.placement_combo.addItem("Shrink to fit margins", "fit")
         self.placement_combo.addItem("Shift by margins (may clip)", "shift")
         self.placement_combo.addItem("Center right of punch line", "hole")
+        self.placement_combo.addItem(
+            "Center on content (skip decorations)", "hole-content"
+        )
         self.placement_combo.addItem(
             "Center on punch line, no shrink (may clip)", "hole-clip"
         )
@@ -829,70 +1625,118 @@ class MainWindow(QMainWindow):
             "between the 18 mm hole line and the far edge (margins "
             "above are ignored)"
         )
-        self.placement_combo.currentIndexChanged.connect(
-            lambda: [
-                spin.setEnabled(
-                    not self.placement_combo.currentData().startswith("hole")
-                )
-                for spin in self.margin_spins.values()
-            ]
-        )
-        margins_form.addRow("Placement", self.placement_combo)
+        row, _ = self._row("Placement", (self.placement_combo, 1))
+        side_layout.addLayout(row)
+
         self.mirror_check = QCheckBox("Mirror margins (binding)")
+        self.mirror_check.setFont(theme.body_font())
+        self.mirror_check.setIcon(theme.icon("mirror", theme.INK, 15))
+        self.mirror_check.setIconSize(QSize(15, 15))
         self.mirror_check.setToolTip(
             "For double-sided printing into a binder: even pages get the "
             "left margin on the right, keeping the binding edge clear on "
             "both sides of the sheet"
         )
-        margins_form.addRow("", self.mirror_check)
         self.hole_check = QCheckBox("Punch hole guide (18 mm)")
+        self.hole_check.setFont(theme.body_font())
+        self.hole_check.setIcon(theme.icon("punch", theme.INK, 15))
+        self.hole_check.setIconSize(QSize(15, 15))
         self.hole_check.setToolTip(
             "Shows a dashed line 18 mm from the binding edge in the "
             "preview as a hole-punching reference; alternates sides "
             "when margins are mirrored. Not printed."
         )
-        margins_form.addRow("", self.hole_check)
-        side_layout.addWidget(margins_group)
-        side_layout.addStretch(1)
+        for check in (self.mirror_check, self.hole_check):
+            side_layout.addWidget(check)
 
-        settings_row = QHBoxLayout()
-        self.last_button = QPushButton("Use last print's settings")
+    def _build_actions(self) -> QWidget:
+        footer = QWidget()
+        layout = QVBoxLayout(footer)
+        layout.setContentsMargins(
+            SIDE_PAD, 14, SIDE_PAD + SCROLLBAR_ROOM, theme.PAD_SECTION
+        )
+        layout.setSpacing(theme.GAP_CONTROL + 3)
+
+        row = QHBoxLayout()
+        row.setSpacing(theme.GAP_CONTROL)
+        self.last_button = QPushButton(" Use last print's settings")
+        self.last_button.setIcon(theme.icon("history", theme.INK, 15))
+        self.last_button.setIconSize(QSize(15, 15))
+        self.last_button.setMinimumHeight(theme.CONTROL_HEIGHT)
         self.last_button.setEnabled(printing.load_last_job() is not None)
         self.last_button.clicked.connect(self._load_last_settings)
-        settings_row.addWidget(self.last_button, stretch=1)
+        row.addWidget(self.last_button, 1)
         reset_button = QPushButton("Reset")
+        reset_button.setMinimumHeight(theme.CONTROL_HEIGHT)
         reset_button.setToolTip("Reset all print options to their defaults")
         reset_button.clicked.connect(self._reset_settings)
-        settings_row.addWidget(reset_button)
-        side_layout.addLayout(settings_row)
+        row.addWidget(reset_button, 0)
+        layout.addLayout(row)
 
-        self.print_button = QPushButton("Print")
+        self.print_button = QPushButton()
+        self.print_button.setIcon(theme.icon("print", theme.ACCENT_TEXT, 16))
+        self.print_button.setIconSize(QSize(16, 16))
+        theme.style_print_button(self.print_button, "Print")
         self.print_button.setDefault(True)
         self.print_button.setEnabled(False)
+        self.print_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.print_button.clicked.connect(self.do_print)
-        side_layout.addWidget(self.print_button)
+        self.print_button.installEventFilter(self)
+        self.print_spinner = Spinner(15, theme.TEXT_MUTED, self.print_button)
+        self.print_spinner.hide()
+        layout.addWidget(self.print_button)
+        return footer
 
-        side_scroll = QScrollArea(self)
-        side_scroll.setWidget(side)
-        side_scroll.setWidgetResizable(True)
-        side_scroll.setFixedWidth(320)
-        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+    # ----- status bar -----
 
-        central = QWidget(self)
-        layout = QHBoxLayout(central)
-        layout.addLayout(viewer_column, stretch=1)
-        layout.addWidget(side_scroll)
-        self.setCentralWidget(central)
+    def _build_status_bar(self) -> None:
+        bar = QStatusBar(self)
+        self.setStatusBar(bar)
 
+        self.job_chip = JobChip("printing", "", self)
+        self.job_chip.close_button.setToolTip("Dismiss")
+        self.job_chip.closed.connect(self._dismiss_job_chip)
+        self.job_chip.hide()
+        bar.addPermanentWidget(self.job_chip)
+
+        self.zoom_status = QLabel("Fit width")
+        self.zoom_status.setObjectName("metaLabel")
+        self.zoom_status.setFont(
+            theme.body_font(theme.SMALL_POINT_SIZE, tabular=True)
+        )
+        bar.addPermanentWidget(self.zoom_status)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFixedHeight(14)
+        bar.addPermanentWidget(separator)
+
+        self.printer_status = QLabel("")
+        self.printer_status.setObjectName("metaLabel")
+        self.printer_status.setFont(theme.body_font(theme.SMALL_POINT_SIZE))
+        bar.addPermanentWidget(self.printer_status)
+        pad = QWidget()  # breathing room between the text and the edge
+        pad.setFixedWidth(10)
+        bar.addPermanentWidget(pad)
+
+    # ----- signals -----
+
+    def _connect_signals(self) -> None:
         self._caps_cache: dict[str, dict[str, printing.PPDOption]] = {}
         self.printer_combo.currentTextChanged.connect(self._update_capabilities)
+        self.viewer.verticalScrollBar().valueChanged.connect(
+            self._update_page_chip
+        )
+        self.viewer.zoom_changed.connect(self._update_page_chip)
+        self.document.statusChanged.connect(self._update_page_chip)
+        self.color_combo.currentIndexChanged.connect(self._apply_color_preview)
 
         # debounce option changes before re-running the preview transform
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(500)
         self._preview_timer.timeout.connect(self._apply_layout_preview)
-        self.range_edit.textChanged.connect(self._preview_timer.start)
+        self.range_edit.textChanged.connect(self._on_range_changed)
         for combo in (
             self.media_combo,
             self.orientation_combo,
@@ -906,12 +1750,17 @@ class MainWindow(QMainWindow):
         for spin in self.margin_spins.values():
             spin.valueChanged.connect(self._preview_timer.start)
         self.placement_combo.currentIndexChanged.connect(self._preview_timer.start)
+        self.placement_combo.currentIndexChanged.connect(self._on_placement_changed)
         self.mirror_check.toggled.connect(self._preview_timer.start)
+        self.mirror_check.toggled.connect(self._update_placement_diagram)
+        self.placement_combo.currentIndexChanged.connect(
+            self._on_placement_changed
+        )
         self.hole_check.toggled.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._update_more_button)
 
-        # keep the collapsed "more options" button honest about what's set
+        # keep the collapsed "more options" badge honest about what's set
         for combo in (
             self.media_combo,
             self.orientation_combo,
@@ -926,9 +1775,6 @@ class MainWindow(QMainWindow):
             combo.currentIndexChanged.connect(self._update_more_button)
         self.collate_check.toggled.connect(self._update_more_button)
         self.reverse_check.toggled.connect(self._update_more_button)
-
-        self.setStatusBar(QStatusBar(self))
-        self.refresh_printers()
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -984,29 +1830,84 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about_action)
 
     def show_help(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("User Guide")
-        dialog.resize(620, 640)
-        layout = QVBoxLayout(dialog)
-        browser = QTextBrowser()
-        browser.setOpenExternalLinks(True)
-        browser.setHtml(HELP_HTML)
-        layout.addWidget(browser)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dialog.reject)
-        buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
-        dialog.exec()
+        UserGuideDialog(self).exec()
 
     def show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "About PDF Printer",
-            f"<b>PDF Printer</b> {__version__}<br>"
-            "Prints PDFs via CUPS with a true print preview.<br><br>"
-            '<a href="https://github.com/CharlieJ515/PdfPrinter">'
-            "github.com/CharlieJ515/PdfPrinter</a><br>MIT license",
+        AboutDialog(self).exec()
+
+    # ---------- overlays ----------
+
+    def eventFilter(self, watched, event):  # noqa: N802 (Qt naming)
+        # runs during construction too, so never assume a widget exists
+        kind = event.type()
+        if kind in (QEvent.Type.Resize, QEvent.Type.Show):
+            if watched is getattr(self, "viewer", None):
+                self._layout_overlays()
+            elif watched is getattr(self, "print_button", None):
+                self._layout_print_spinner()
+        return super().eventFilter(watched, event)
+
+    def _layout_overlays(self) -> None:
+        pill = getattr(self, "zoom_pill", None)
+        if pill is None:
+            return
+        width, height = self.viewer.width(), self.viewer.height()
+        pill.adjustSize()
+        pill.move(
+            max(0, (width - pill.width()) // 2),
+            max(0, height - pill.height() - 18),
         )
+        pill.raise_()
+        for chip, right in (
+            (self.binder_chip, False),
+            (self.render_chip, True),
+        ):
+            chip.adjustSize()
+            x = max(16, width - chip.width() - 16) if right else 16
+            chip.move(x, 14)
+            chip.raise_()
+        self.page_chip.adjustSize()
+        self.page_chip.move(
+            max(16, width - self.page_chip.width() - 16),
+            max(0, height - self.page_chip.height() - 18),
+        )
+        self.page_chip.raise_()
+
+    def _update_page_chip(self, *_args) -> None:
+        chip = getattr(self, "page_chip", None)
+        if chip is None:
+            return
+        total = self.document.pageCount()
+        if total <= 0:
+            chip.hide()
+            return
+        layout = self.viewer._page_layout()
+        center_y = self.viewer.viewport().height() / 2
+        current = 1
+        for index, (rect, _scale) in enumerate(layout):
+            if rect.top() <= center_y:
+                current = index + 1
+            else:
+                break
+        text = f"{current} / {total}"
+        if chip.label.text() != text or not chip.isVisible():
+            chip.label.setText(text)
+            chip.adjustSize()
+            chip.show()
+            self._layout_overlays()
+
+    def _layout_print_spinner(self) -> None:
+        button = getattr(self, "print_button", None)
+        if button is None or getattr(self, "print_spinner", None) is None:
+            return
+        text = button.text().strip()
+        metrics = QFontMetrics(button.font())
+        advance = metrics.horizontalAdvance(text)
+        size = self.print_spinner.width()
+        x = max(12, (button.width() - advance) // 2 - size - 10)
+        y = max(0, (button.height() - size) // 2)
+        self.print_spinner.move(x, y)
+        self.print_spinner.raise_()
 
     # ---------- zoom ----------
 
@@ -1020,28 +1921,70 @@ class MainWindow(QMainWindow):
         self.viewer.fit_width()
 
     def _on_zoom_changed(self, factor: float) -> None:
-        message = "Zoom: fit width" if factor == 0.0 else f"Zoom: {factor:.0%}"
+        if factor == 0.0:
+            self.zoom_status.setText("Fit width")
+            self.zoom_pill_label.setText("Fit")
+            message = "Zoom: fit width"
+        else:
+            self.zoom_status.setText(f"{factor:.0%}")
+            self.zoom_pill_label.setText(f"{factor:.0%}")
+            message = f"Zoom: {factor:.0%}"
         self.statusBar().showMessage(message, 2000)
+        self._layout_overlays()
 
     # ---------- preview mirroring of print options ----------
 
     def _apply_color_preview(self) -> None:
-        # also gray when the printer's own default is grayscale (the
-        # selected "Grayscale (default)" entry sends no option)
-        grayscale = self.color_combo.currentData() == "monochrome" or (
-            self.color_combo.currentData() == ""
-            and self.color_combo.currentText().startswith("Grayscale")
-        )
+        grayscale = self.color_combo.currentData() == "monochrome"
+        # the effect goes on the VIEWPORT, not the view: the floating
+        # chips and the zoom pill are children of the view and must keep
+        # their own colours while the paper previews in grayscale
+        target = self.viewer.viewport()
         if grayscale:
-            effect = QGraphicsColorizeEffect(self.viewer)
+            effect = QGraphicsColorizeEffect(target)
             # the effect grayscales by luminance, then SCREENS the tint
             # color over it — black is the identity for screen, leaving
             # the true grayscale (a gray tint would wash everything out)
             effect.setColor(QColor(0, 0, 0))
             effect.setStrength(1.0)
-            self.viewer.setGraphicsEffect(effect)
+            target.setGraphicsEffect(effect)
         else:
-            self.viewer.setGraphicsEffect(None)
+            target.setGraphicsEffect(None)
+
+    def _on_range_changed(self, text: str) -> None:
+        invalid = bool(text.strip()) and not printing.validate_page_range(
+            text.strip()
+        )
+        if bool(self.range_edit.property("invalid")) != invalid:
+            self.range_edit.setProperty("invalid", invalid or None)
+            _repolish(self.range_edit)
+        self.range_hint.setVisible(not invalid)
+        self.range_error.setVisible(invalid)
+        self._preview_timer.start()
+        self._update_header()
+
+    def _on_placement_changed(self) -> None:
+        hole = self.placement_combo.currentData().startswith("hole")
+        for spin in self.margin_spins.values():
+            spin.setEnabled(not hole)
+        self._update_placement_diagram()
+
+    def _on_placement_changed(self) -> None:
+        # punch placements turn the guide on as a starting point; the
+        # checkbox stays independent so it can be switched off again
+        mode = self.placement_combo.currentData() or ""
+        if mode.startswith("hole"):
+            self.hole_check.setChecked(True)
+
+    def _update_placement_diagram(self) -> None:
+        mode = self.placement_combo.currentData() or "fit"
+        diagram_mode = "hole" if mode == "hole-content" else mode
+        self.placement_diagram.set_state(
+            diagram_mode, self.mirror_check.isChecked()
+        )
+        self.placement_caption.setText(
+            PLACEMENT_CAPTIONS.get(mode, PLACEMENT_CAPTIONS["fit"])
+        )
 
     def _load_preserving_view(self, path: str) -> None:
         """Reload the document without jumping back to the first page.
@@ -1058,6 +2001,7 @@ class MainWindow(QMainWindow):
         def restore() -> None:
             vbar.setValue(round(v_frac * vbar.maximum()))
             hbar.setValue(round(h_frac * hbar.maximum()))
+            self.viewer.update_guides()  # the page geometry just changed
 
         # the view recalculates its scroll range after the load event
         # settles, so restore once the new range is in place
@@ -1090,9 +2034,11 @@ class MainWindow(QMainWindow):
         )
         self.viewer.set_hole_guide(
             printing.HOLE_GUIDE_MM * printing.MM_TO_PT
-            if job.hole_guide or hole_mode
+            if job.hole_guide
             else None
         )
+        self._update_legend(job)
+        self._update_binder_chip(job)
         options = printing.preview_job_options(job)
         has_margins = printing.needs_gs_pass(job)
         if not options and not has_margins:
@@ -1100,6 +2046,7 @@ class MainWindow(QMainWindow):
                 self._load_preserving_view(self.current_path)
                 self._showing_transformed = False
                 self.statusBar().showMessage("Preview: original document", 3000)
+                QTimer.singleShot(0, self._update_header)
             return
         if self._preview_worker is not None and self._preview_worker.isRunning():
             # a transform is in flight: re-run with fresh options after it
@@ -1135,6 +2082,7 @@ class MainWindow(QMainWindow):
             return work
 
         self.statusBar().showMessage("Rendering preview…")
+        self._set_rendering(True)
         worker = _TransformWorker(task, self)
         worker.done.connect(
             lambda result, error: self._on_preview_done(
@@ -1160,6 +2108,7 @@ class MainWindow(QMainWindow):
             self._preview_dirty = False
             self._apply_layout_preview()
             return
+        self._set_rendering(False)
         if error is not None:
             # stays until the next preview succeeds; full text on stderr
             self.statusBar().showMessage(f"Preview failed: {error}")
@@ -1167,11 +2116,112 @@ class MainWindow(QMainWindow):
             return
         if result == source:
             self.statusBar().clearMessage()
+            self._showing_transformed = False
+            self._update_header()
             return
         self._load_preserving_view(result)
         self._showing_transformed = True
         label = options if options else "margins"
         self.statusBar().showMessage(f"Preview: as printed ({label})", 5000)
+        # the page count only settles once the load event has run
+        QTimer.singleShot(0, self._update_header)
+
+    def _set_rendering(self, running: bool) -> None:
+        self.render_chip.setVisible(running and self.current_path is not None)
+        if running:
+            self.render_chip.spinner.start()
+        else:
+            self.render_chip.spinner.stop()
+        self._layout_overlays()
+
+    # ---------- header, legend and chips ----------
+
+    def _update_header(self) -> None:
+        if not self.current_path:
+            self.header_icon.setVisible(False)
+            self.header_name.setFullText("No document")
+            self.header_name.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            self.header_meta.setFullText("")
+            self.header_meta.setVisible(False)
+            self._update_print_label()
+            return
+        self.header_icon.setVisible(True)
+        self.header_name.setStyleSheet("")
+        self.header_name.setFullText(os.path.basename(self.current_path))
+        self.header_meta.setVisible(True)
+
+        pages = self._source_pages
+        parts = [f"{pages} page" + ("" if pages == 1 else "s")]
+        if self._showing_transformed:
+            page_range = self.range_edit.text().strip()
+            if page_range and printing.validate_page_range(page_range):
+                parts.append(f"printing pages {page_range}")
+            sheets = max(0, self.document.pageCount())
+            parts.append(f"{sheets} sheet" + ("" if sheets == 1 else "s"))
+        else:
+            size = _human_size(self.current_path)
+            if size:
+                parts.append(size)
+            parts.append(_abbrev_dir(self.current_path))
+        self.header_meta.setFullText(" · ".join(parts))
+        self._update_print_label()
+
+    def _update_print_label(self) -> None:
+        if self._print_stage != "idle":
+            return
+        sheets = self.document.pageCount() if self.current_path else 0
+        if not self.current_path or sheets <= 0:
+            text = "Print"
+        elif sheets == 1:
+            text = "Print 1 sheet"
+        else:
+            text = f"Print {sheets} sheets"
+        self.print_button.setText(f" {text}")
+        self._layout_print_spinner()
+
+    def _update_legend(self, job: printing.PrintJob | None = None) -> None:
+        if job is None:
+            job = self._current_job() if self.current_path else None
+        if job is None or not self.current_path:
+            self.legend_bar.setVisible(False)
+            return
+        hole_mode = job.margin_mode.startswith("hole")
+        show_margins = not hole_mode and printing.margins_active(job)
+        if show_margins:
+            self.legend_margins_text.setText(
+                "Margins "
+                f"{job.margin_left:g} / {job.margin_right:g} / "
+                f"{job.margin_top:g} / {job.margin_bottom:g} mm"
+            )
+        self.legend_margins.setVisible(show_margins)
+
+        show_punch = bool(job.hole_guide)
+        self.legend_punch_text.setText(
+            f"Punch line {printing.HOLE_GUIDE_MM:g} mm"
+        )
+        self.legend_punch.setVisible(show_punch)
+
+        hardware = self._printer_hw
+        show_hw = bool(hardware and any(hardware))
+        if show_hw:
+            worst = max(hardware) / printing.MM_TO_PT
+            self.legend_hw_text.setText(f"Unprintable {worst:.1f} mm")
+        self.legend_hw.setVisible(show_hw)
+        self.legend_bar.setVisible(True)
+
+    def _update_binder_chip(self, job: printing.PrintJob) -> None:
+        hole_mode = job.margin_mode.startswith("hole")
+        parts = []
+        if job.mirror_margins:
+            parts.append("mirrored")
+        if job.hole_guide or hole_mode:
+            parts.append(f"{printing.HOLE_GUIDE_MM:g} mm punch")
+        if not parts:
+            self.binder_chip.hide()
+            return
+        self.binder_chip.label.setText("Binder mode · " + " · ".join(parts))
+        self.binder_chip.setVisible(True)
+        self._layout_overlays()
 
     # ---------- actions ----------
 
@@ -1189,14 +2239,24 @@ class MainWindow(QMainWindow):
         default = printing.default_printer()
         if default and default in printers:
             self.printer_combo.setCurrentText(default)
+        if not self._printer_restored:
+            # on startup, come back to the printer of the last print
+            self._printer_restored = True
+            last = printing.load_last_job()
+            if last is not None and last.printer in printers:
+                self.printer_combo.setCurrentText(last.printer)
         self.printer_combo.blockSignals(False)
         self._update_capabilities()
-        self.statusBar().showMessage(f"{len(printers)} printer(s) found", 5000)
+        count = len(printers)
+        self.statusBar().showMessage(
+            f"{count} printer" + ("" if count == 1 else "s") + " found", 5000
+        )
 
     # ---------- more options ----------
 
     def _toggle_more_options(self, checked: bool) -> None:
-        self.more_group.setVisible(checked)
+        if self.more_group is not None:
+            self.more_group.setVisible(checked)
         self._update_more_button()
 
     def _advanced_active_count(self) -> int:
@@ -1219,12 +2279,8 @@ class MainWindow(QMainWindow):
         return count
 
     def _update_more_button(self) -> None:
-        if self.more_button.isChecked():
-            self.more_button.setText("Hide more options")
-            return
         active = self._advanced_active_count()
-        suffix = f" ({active} set)" if active else ""
-        self.more_button.setText(f"Show more options{suffix}")
+        self.more_section.setBadgeText(f"{active} set" if active else None)
 
     # ---------- per-printer capabilities ----------
 
@@ -1243,11 +2299,13 @@ class MainWindow(QMainWindow):
         # gray out duplex on printers without a duplex unit
         has_duplex = not options or printing.supports_duplex(options)
         self.duplex_combo.setEnabled(has_duplex)
-        self.duplex_combo.setToolTip(
-            "" if has_duplex
-            else "Not supported by this printer — use odd/even pages "
-            "to print double-sided manually"
-        )
+        tooltip = "" if has_duplex else DUPLEX_UNSUPPORTED
+        self.duplex_combo.setToolTip(tooltip)
+        for index, (_, _, _, tip) in enumerate(DUPLEX_SEGMENTS):
+            self.duplex_combo.setItemToolTip(index, tooltip or tip)
+        self.duplex_info.setToolTip(tooltip)
+        self.duplex_info.setVisible(not has_duplex)
+        self.duplex_label.setEnabled(has_duplex)
         if not has_duplex:
             self.duplex_combo.setCurrentIndex(0)
 
@@ -1282,16 +2340,45 @@ class MainWindow(QMainWindow):
                 color_default = "monochrome"
             elif any(k in name for k in ("color", "rgb", "cmyk")):
                 color_default = "color"
-        self._rebuild_static_combo(self.color_combo, COLOR_CHOICES, color_default)
-        self._apply_color_preview()  # rebuild bypassed the change signal
+        self._apply_color_default(color_default)
+        if not self._color_user_set:
+            # untouched selection follows the driver's default
+            self.color_combo.blockSignals(True)
+            self.color_combo.setCurrentData(color_default or "color")
+            self.color_combo.blockSignals(False)
+            self._apply_color_preview()
+        self._apply_color_preview()  # the rebuild bypassed the change signal
         self._update_more_button()
+
+        self.printer_status.setText(f"{printer} · idle" if printer else "")
 
         # the printer's unprintable border: shade it in the preview and
         # re-place punch-zone content, which keeps out of it
         self._printer_hw = printing.printer_hw_margins(printer) if printer else None
         self.viewer.set_hw_margins(self._printer_hw)
+        self._update_legend()
         if self.placement_combo.currentData().startswith("hole"):
             self._preview_timer.start()
+
+    def _mark_color_user_set(self) -> None:
+        self._color_user_set = True
+
+    def _apply_color_default(self, default_value: str | None) -> None:
+        """Mark the driver's own colour default on the segmented control.
+
+        Only two concrete choices exist; the "(default)" marker sits on
+        whichever one the driver reports. Selecting the marked segment
+        sends nothing (the printer decides), which is why no separate
+        "Printer" segment is needed.
+        """
+        self._color_default = default_value
+        self.color_combo.blockSignals(True)
+        for index, (label, value) in enumerate(COLOR_SEGMENTS):
+            marked = value == default_value
+            self.color_combo.setItemText(
+                index, f"{label} (default)" if marked else label
+            )
+        self.color_combo.blockSignals(False)
 
     @staticmethod
     def _rebuild_static_combo(
@@ -1338,7 +2425,7 @@ class MainWindow(QMainWindow):
         combo.blockSignals(True)
         combo.clear()
         if option is None:
-            combo.addItem("Printer default", None)
+            combo.addItem("Not reported by driver", None)
             combo.setEnabled(False)
             combo.setToolTip("Not supported by this printer")
             combo.blockSignals(False)
@@ -1363,10 +2450,12 @@ class MainWindow(QMainWindow):
         combo.blockSignals(False)
 
     def open_zotero_dialog(self) -> None:
+        if not self.zotero_storage:
+            return
         # reuse the dialog so the picked collection, search text and
         # scroll position are right where the user left them
         if self._zotero_dialog is None:
-            self._zotero_dialog = ZoteroDialog(self.zotero_storage, self)
+            self._zotero_dialog = ZoteroPickerDialog(self.zotero_storage, self)
         dialog = self._zotero_dialog
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
             self.load_pdf(dialog.selected_path)
@@ -1387,11 +2476,14 @@ class MainWindow(QMainWindow):
             return
         self.current_path = path
         self._showing_transformed = False
-        self.file_label.setText(
-            f"{os.path.basename(path)} — {self.document.pageCount()} page(s)"
-        )
+        self._source_pages = self.document.pageCount()
+        self.preview_stack.setCurrentWidget(self.viewer)
+        self.viewer.update_guides()
         self.print_button.setEnabled(True)
+        self._update_header()
+        self._update_legend()
         self.statusBar().showMessage(f"Loaded {path}", 5000)
+        self._layout_overlays()
         self._preview_timer.start()  # re-apply any active layout options
 
     def _current_job(self) -> printing.PrintJob:
@@ -1407,7 +2499,11 @@ class MainWindow(QMainWindow):
             copies=self.copies_spin.value(),
             page_range=self.range_edit.text().strip(),
             duplex=self.duplex_combo.currentData(),
-            color_mode=self.color_combo.currentData(),
+            color_mode=(
+                ""
+                if self.color_combo.currentData() == self._color_default
+                else self.color_combo.currentData()
+            ),
             media=self.media_combo.currentData(),
             landscape=self.orientation_combo.currentData(),
             number_up=self.nup_combo.currentData(),
@@ -1452,6 +2548,68 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(0)
         self.statusBar().showMessage("Settings reset to defaults", 5000)
 
+    def _job_summary(self, job: printing.PrintJob) -> str:
+        """The printer plus only the settings that differ from defaults."""
+        lines = [job.printer or "(no printer)"]
+        duplex_names = {
+            "two-sided-long-edge": "Double-sided (long edge)",
+            "two-sided-short-edge": "Double-sided (short edge)",
+        }
+        placement_names = {
+            "shift": "Shift by margins",
+            "hole": "Center right of punch line",
+            "hole-content": "Center on content beside punch line",
+            "hole-clip": "Center on punch line (no shrink)",
+        }
+
+        def add(condition: bool, text: str) -> None:
+            if condition:
+                lines.append("\u2022 " + text)
+
+        add(job.copies != 1, f"Copies: {job.copies}")
+        add(bool(job.page_range), f"Pages: {job.page_range}")
+        add(job.duplex != "one-sided",
+            "Sides: " + duplex_names.get(job.duplex, job.duplex))
+        add(job.color_mode == "color", "Color: Color")
+        add(job.color_mode == "monochrome", "Color: Grayscale")
+        add(bool(job.media), f"Paper: {job.media}")
+        add(job.landscape, "Orientation: Landscape")
+        add(job.number_up > 1, f"Pages/sheet: {job.number_up}")
+        add(bool(job.number_up_layout), f"N-up order: {job.number_up_layout}")
+        add(job.collate, "Collate copies")
+        add(bool(job.page_set), f"Page set: {job.page_set} pages")
+        add(job.reverse, "Reverse order")
+        if job.scale_percent != 100:
+            add(True, f"Scale: {job.scale_percent} %")
+        elif job.scaling:
+            add(True, f"Scaling: {job.scaling}")
+        margins = [
+            (side, mm)
+            for side, mm in (
+                ("L", job.margin_left), ("R", job.margin_right),
+                ("T", job.margin_top), ("B", job.margin_bottom),
+            )
+            if mm > 0
+        ]
+        add(bool(margins),
+            "Margins: " + "  ".join(f"{s} {mm:g} mm" for s, mm in margins))
+        add(job.margin_mode in placement_names,
+            "Placement: " + placement_names.get(job.margin_mode, ""))
+        add(job.mirror_margins, "Mirror margins")
+        add(job.hole_guide, "Punch hole guide")
+        for keyword, choice in job.extra_options.items():
+            add(True, f"{keyword}: {choice}")
+        if len(lines) == 1:
+            lines.append("\u2022 all settings at defaults")
+        return "\n".join(lines)
+
+    def _refresh_last_tooltip(self) -> None:
+        job = printing.load_last_job()
+        if job is None:
+            self.last_button.setToolTip("No print has been made yet")
+        else:
+            self.last_button.setToolTip(self._job_summary(job))
+
     def _load_last_settings(self) -> None:
         job = printing.load_last_job()
         if job is None:
@@ -1459,10 +2617,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No saved print settings found", 5000)
             return
         self._apply_job_to_ui(job)
-        self.statusBar().showMessage("Loaded last print's settings", 5000)
+        if job.printer and self.printer_combo.currentText() != job.printer:
+            self.statusBar().showMessage(
+                "Loaded last print's settings \u2014 printer "
+                f"\u201c{job.printer}\u201d is not available, kept "
+                f"{self.printer_combo.currentText()}"
+            )
+        else:
+            self.statusBar().showMessage("Loaded last print's settings", 5000)
 
     def _apply_job_to_ui(self, job: printing.PrintJob) -> None:
-        def pick(combo: QComboBox, value) -> None:
+        def pick(combo, value) -> None:
             index = combo.findData(value)
             if index >= 0:
                 combo.setCurrentIndex(index)
@@ -1472,10 +2637,16 @@ class MainWindow(QMainWindow):
             index = self.printer_combo.findText(job.printer)
             if index >= 0:
                 self.printer_combo.setCurrentIndex(index)
+
         self.copies_spin.setValue(job.copies)
         self.range_edit.setText(job.page_range)
         pick(self.duplex_combo, job.duplex)
-        pick(self.color_combo, job.color_mode)
+        if job.color_mode:
+            pick(self.color_combo, job.color_mode)
+            self._color_user_set = True
+        else:  # printer default: the marked segment (Color if unknown)
+            pick(self.color_combo, self._color_default or "color")
+            self._color_user_set = False
         pick(self.media_combo, job.media)
         pick(self.orientation_combo, job.landscape)
         pick(self.nup_combo, job.number_up)
@@ -1502,7 +2673,38 @@ class MainWindow(QMainWindow):
         self.mirror_check.setChecked(job.mirror_margins)
         pick(self.placement_combo, job.margin_mode)
         self.hole_check.setChecked(job.hole_guide)
+        self._on_placement_changed()
         self._preview_timer.start()
+
+    # ---------- print ----------
+
+    def _set_print_stage(self, stage: str) -> None:
+        """Move the print button between idle / preparing / submitted."""
+        self._print_stage = stage
+        button = self.print_button
+        if stage == "preparing":
+            button.setEnabled(False)
+            button.setIcon(QIcon())
+            button.setProperty("done", None)
+            button.setText("Preparing job…")
+            self.print_spinner.show()
+            self.print_spinner.start()
+        elif stage == "submitted":
+            button.setEnabled(True)
+            button.setIcon(theme.icon("check", theme.ACCENT_TEXT, 16))
+            button.setProperty("done", True)
+            button.setText(" Submitted")
+            self.print_spinner.stop()
+            self.print_spinner.hide()
+        else:
+            button.setEnabled(self.current_path is not None)
+            button.setIcon(theme.icon("print", theme.ACCENT_TEXT, 16))
+            button.setProperty("done", None)
+            self.print_spinner.stop()
+            self.print_spinner.hide()
+            self._update_print_label()
+        _repolish(button)
+        self._layout_print_spinner()
 
     def do_print(self) -> None:
         if not self.current_path:
@@ -1511,14 +2713,17 @@ class MainWindow(QMainWindow):
                 return
         page_range = self.range_edit.text().strip()
         if not printing.validate_page_range(page_range):
+            self.range_edit.setFocus()
+            self.statusBar().showMessage(
+                "Invalid pages — must look like 1-4,7,10-12"
+            )
             QMessageBox.warning(
                 self, "Invalid pages", "Page range must look like: 1-4,7,10-12"
             )
             return
         job = self._current_job()
         path = self.current_path
-        self.print_button.setEnabled(False)
-        self.print_button.setText("Preparing job…")
+        self._set_print_stage("preparing")
         self.statusBar().showMessage("Preparing print job…")
         worker = _TransformWorker(lambda: printing.print_file(path, job), self)
         worker.done.connect(
@@ -1536,25 +2741,46 @@ class MainWindow(QMainWindow):
     ) -> None:
         worker.deleteLater()
         self._print_worker = None
-        self.print_button.setEnabled(True)
         if error is not None:
-            self.print_button.setText("Print")
+            self._set_print_stage("idle")
+            self._show_job_chip("failed", "Print failed")
             self.statusBar().showMessage(f"Print failed: {error}")
-            QMessageBox.critical(self, "Print failed", error)
+            if show_print_error(self, error, detail=job.printer) == "refresh":
+                self.refresh_printers()
             return
         printing.save_last_job(job)
         self.last_button.setEnabled(True)
-        self.print_button.setText("✓ Submitted")
-        QTimer.singleShot(4000, lambda: self.print_button.setText("Print"))
+        self._refresh_last_tooltip()
+        self._set_print_stage("submitted")
+        QTimer.singleShot(4000, self._clear_submitted)
+        self._show_job_chip("printing", f"Job {job_id} · printing…")
         self.statusBar().showMessage(f"Job {job_id} submitted to the printer")
         self._track_job(job_id)
 
+    def _clear_submitted(self) -> None:
+        if self._print_stage == "submitted":
+            self._set_print_stage("idle")
+
     # ---------- job tracking ----------
+
+    def _show_job_chip(self, state: str, text: str, hide_after: int = 0) -> None:
+        self._chip_timer.stop()
+        self.job_chip.set_state(state, text)
+        self.job_chip.show()
+        if hide_after:
+            self._chip_timer.start(hide_after)
+
+    def _dismiss_job_chip(self) -> None:
+        self._chip_timer.stop()
+        self.job_chip.hide()
 
     def _track_job(self, job_id: str) -> None:
         self._tracked_job = job_id
         self._track_polls = 0
         self._job_timer.start()
+        printer = self.printer_combo.currentText()
+        if printer:
+            self.printer_status.setText(f"{printer} · printing")
 
     def _poll_job(self) -> None:
         job_id = self._tracked_job
@@ -1563,20 +2789,29 @@ class MainWindow(QMainWindow):
             return
         self._track_polls += 1
         state = printing.job_state(job_id)
+        printer = self.printer_combo.currentText()
         if state == "queued":
             if self._track_polls > 150:  # ~5 minutes; stop nagging
                 self._job_timer.stop()
+                self._show_job_chip("printing", f"Job {job_id} · still queued")
                 self.statusBar().showMessage(
                     f"Job {job_id} is still queued (check the printer)"
                 )
             else:
+                self._show_job_chip("printing", f"Job {job_id} · printing…")
                 self.statusBar().showMessage(f"Job {job_id}: printing…")
             return
         self._job_timer.stop()
         self._tracked_job = None
+        if printer:
+            self.printer_status.setText(f"{printer} · idle")
         if state == "completed":
+            self._show_job_chip(
+                "completed", f"Job {job_id} · completed", hide_after=30000
+            )
             self.statusBar().showMessage(f"Job {job_id} completed ✓", 30000)
         else:
+            self._show_job_chip("canceled", f"Job {job_id} · canceled")
             self.statusBar().showMessage(
                 f"Job {job_id} disappeared from the queue — it may have "
                 "been canceled or aborted"
