@@ -51,8 +51,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, printing, zotero
-from .help import HELP_HTML
+from . import printing, zotero
+from .dialogs import (
+    AboutDialog,
+    UserGuideDialog,
+    ZoteroPickerDialog,
+    show_print_error,
+)
 
 DUPLEX_CHOICES = [
     ("One-sided", "one-sided"),
@@ -465,124 +470,597 @@ class _TransformWorker(QThread):
             self.done.emit(None, f"{type(exc).__name__}: {exc}")
 
 
-class ZoteroDialog(QDialog):
-    """Zotero-style picker: collections tree plus title/creator list."""
+class MainWindow(QMainWindow):
+    def __init__(self, pdf_path: str | None = None):
+        super().__init__()
+        self.setWindowTitle("PDF Printer")
+        self.resize(1000, 700)
+        self.setAcceptDrops(True)
 
-    def __init__(self, storage_dir: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Open from Zotero")
-        self.resize(900, 520)
-        self.selected_path: str | None = None
+        self.document = QPdfDocument(self)
+        self.current_path: str | None = None
+        self._subset_dir: tempfile.TemporaryDirectory | None = None
+        self._showing_transformed = False
+        self._zotero_dialog: ZoteroPickerDialog | None = None
+        self._preview_worker: _TransformWorker | None = None
+        self._preview_dirty = False
+        self._print_worker: _TransformWorker | None = None
+        self._tracked_job: str | None = None
+        self._track_polls = 0
+        self._job_timer = QTimer(self)
+        self._job_timer.setInterval(2000)
+        self._job_timer.timeout.connect(self._poll_job)
 
-        library = zotero.load_library(storage_dir)
-        if library is not None:
-            self._collections, self._items = library
-        else:
-            # metadata unavailable: flat file listing as fallback
-            self._collections = []
-            self._items = [
-                zotero.ZoteroItem(title=name, creators="", path=path, mtime=0)
-                for name, path in zotero.list_pdfs(storage_dir)
-            ]
-        self._children: dict[int | None, list[zotero.ZoteroCollection]] = {}
-        for collection in self._collections:
-            self._children.setdefault(collection.parent, []).append(collection)
+        self._build_ui()
+        self._build_menu()
 
-        layout = QVBoxLayout(self)
-        self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText(
-            f"Search {len(self._items)} PDFs by title or author…"
+        if pdf_path:
+            self.load_pdf(pdf_path)
+
+    # ---------- UI construction ----------
+
+    def _build_ui(self) -> None:
+        self.viewer = ZoomablePdfView(self)
+        self.viewer.setDocument(self.document)
+        self.viewer.setPageMode(QPdfView.PageMode.MultiPage)
+        self.viewer.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self.viewer.zoom_changed.connect(self._on_zoom_changed)
+
+        zoom_bar = QHBoxLayout()
+        zoom_out_button = QPushButton("−")
+        zoom_out_button.setFixedWidth(36)
+        zoom_out_button.setToolTip("Zoom out (Ctrl+-, Ctrl+scroll)")
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_in_button = QPushButton("+")
+        zoom_in_button.setFixedWidth(36)
+        zoom_in_button.setToolTip("Zoom in (Ctrl++, Ctrl+scroll)")
+        zoom_in_button.clicked.connect(self.zoom_in)
+        fit_button = QPushButton("Fit width")
+        fit_button.setToolTip("Fit page to window width (Ctrl+0)")
+        fit_button.clicked.connect(self.fit_width)
+        zoom_bar.addWidget(zoom_out_button)
+        zoom_bar.addWidget(zoom_in_button)
+        zoom_bar.addWidget(fit_button)
+        zoom_bar.addStretch(1)
+
+        viewer_column = QVBoxLayout()
+        viewer_column.addLayout(zoom_bar)
+        viewer_column.addWidget(self.viewer, stretch=1)
+
+        side = QWidget(self)
+        side.setFixedWidth(300)
+        side_layout = QVBoxLayout(side)
+
+        open_button = QPushButton("Open PDF…")
+        open_button.clicked.connect(self.open_dialog)
+        side_layout.addWidget(open_button)
+
+        self.zotero_storage = zotero.find_storage_dir()
+        if self.zotero_storage:
+            zotero_button = QPushButton("Open from Zotero…")
+            zotero_button.clicked.connect(self.open_zotero_dialog)
+            side_layout.addWidget(zotero_button)
+
+        self.file_label = QLabel("No file loaded")
+        self.file_label.setWordWrap(True)
+        side_layout.addWidget(self.file_label)
+
+        options = QGroupBox("Print options")
+        form = QFormLayout(options)
+
+        self.printer_combo = QComboBox()
+        form.addRow("Printer", self.printer_combo)
+
+        refresh_button = QPushButton("Refresh printers")
+        refresh_button.clicked.connect(self.refresh_printers)
+        form.addRow("", refresh_button)
+
+        self.copies_spin = QSpinBox()
+        self.copies_spin.setToolTip("Number of copies to print")
+        self.copies_spin.setRange(1, 999)
+        form.addRow("Copies", self.copies_spin)
+
+        self.range_edit = QLineEdit()
+        self.range_edit.setToolTip(
+            "Pages to print, e.g. 1-4,7 — the preview shows the selection"
         )
-        self.filter_edit.textChanged.connect(self._repopulate)
-        layout.addWidget(self.filter_edit)
+        self.range_edit.setPlaceholderText("All pages (e.g. 1-4,7)")
+        form.addRow("Pages", self.range_edit)
 
-        splitter = QSplitter(self)
+        self.duplex_combo = QComboBox()
+        for label, value in DUPLEX_CHOICES:
+            self.duplex_combo.addItem(label, value)
+        form.addRow("Duplex", self.duplex_combo)
 
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        root = QTreeWidgetItem(["My Library"])
-        root.setData(0, Qt.ItemDataRole.UserRole, None)
-        self.tree.addTopLevelItem(root)
-        self._add_collection_items(root, None)
-        root.setExpanded(True)
-        self.tree.setCurrentItem(root)
-        self.tree.currentItemChanged.connect(self._repopulate)
-        splitter.addWidget(self.tree)
-
-        self.list = QTreeWidget()
-        self.list.setHeaderLabels(["Title", "Creator"])
-        self.list.setRootIsDecorated(False)
-        self.list.setColumnWidth(0, 460)
-        self.list.itemDoubleClicked.connect(lambda _item, _col: self.accept())
-        splitter.addWidget(self.list)
-
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        layout.addWidget(splitter, stretch=1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Open
-            | QDialogButtonBox.StandardButton.Cancel
+        self.color_combo = QComboBox()
+        self.color_combo.setToolTip(
+            "Color or grayscale output; grayscale is previewed too"
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        for label, value in COLOR_CHOICES:
+            self.color_combo.addItem(label, value)
+        self.color_combo.currentIndexChanged.connect(self._apply_color_preview)
+        form.addRow("Color", self.color_combo)
 
-        self._repopulate()
-        self.filter_edit.setFocus()
+        side_layout.addWidget(options)
 
-    def _add_collection_items(
-        self, parent_item: QTreeWidgetItem, parent_id: int | None
-    ) -> None:
-        for collection in self._children.get(parent_id, []):
-            item = QTreeWidgetItem([collection.name])
-            item.setData(0, Qt.ItemDataRole.UserRole, collection.id)
-            parent_item.addChild(item)
-            self._add_collection_items(item, collection.id)
+        self.more_button = QPushButton("Show more options")
+        self.more_button.setCheckable(True)
+        self.more_button.toggled.connect(self._toggle_more_options)
+        side_layout.addWidget(self.more_button)
 
-    def _selected_collection_ids(self) -> set[int] | None:
-        """The picked collection and its descendants; None means all."""
-        current = self.tree.currentItem()
-        if current is None:
-            return None
-        collection_id = current.data(0, Qt.ItemDataRole.UserRole)
-        if collection_id is None:
-            return None
-        ids = {collection_id}
-        pending = [collection_id]
-        while pending:
-            for child in self._children.get(pending.pop(), []):
-                ids.add(child.id)
-                pending.append(child.id)
-        return ids
+        self.more_group = QGroupBox("More options")
+        self.more_group.setVisible(False)
+        more_form = QFormLayout(self.more_group)
+        form = more_form  # the remaining rows are the advanced ones
 
-    def _repopulate(self, *_args) -> None:
-        tokens = self.filter_edit.text().lower().split()
-        collection_ids = self._selected_collection_ids()
-        self.list.clear()
-        for entry in self._items:
-            if collection_ids is not None and not (
-                entry.collections & collection_ids
-            ):
-                continue
-            haystack = (
-                f"{entry.title} {entry.creators} "
-                f"{os.path.basename(entry.path)}".lower()
+        self.media_combo = QComboBox()
+        for label, value in MEDIA_CHOICES:
+            self.media_combo.addItem(label, value)
+        form.addRow("Paper", self.media_combo)
+
+        self.orientation_combo = QComboBox()
+        self.orientation_combo.setToolTip("Rotate the layout to landscape")
+        for label, value in ORIENTATION_CHOICES:
+            self.orientation_combo.addItem(label, value)
+        form.addRow("Orientation", self.orientation_combo)
+
+        self.nup_combo = QComboBox()
+        self.nup_combo.setToolTip("Print several pages on each sheet")
+        for label, value in NUP_CHOICES:
+            self.nup_combo.addItem(label, value)
+        form.addRow("Pages/sheet", self.nup_combo)
+
+        self.nup_layout_combo = QComboBox()
+        self.nup_layout_combo.setToolTip(
+            "Order in which pages fill the sheet (pages/sheet > 1)"
+        )
+        for label, value in NUP_LAYOUT_CHOICES:
+            self.nup_layout_combo.addItem(label, value)
+        self.nup_layout_combo.setEnabled(False)
+        self.nup_combo.currentIndexChanged.connect(
+            lambda: self.nup_layout_combo.setEnabled(
+                self.nup_combo.currentData() > 1
             )
-            if not all(token in haystack for token in tokens):
-                continue
-            item = QTreeWidgetItem([entry.title, entry.creators])
-            item.setData(0, Qt.ItemDataRole.UserRole, entry.path)
-            item.setToolTip(0, entry.path)
-            self.list.addTopLevelItem(item)
-        if self.list.topLevelItemCount():
-            self.list.setCurrentItem(self.list.topLevelItem(0))
+        )
+        form.addRow("N-up order", self.nup_layout_combo)
 
-    def accept(self) -> None:  # noqa: A003 (Qt naming)
-        item = self.list.currentItem()
-        if item is not None:
-            self.selected_path = item.data(0, Qt.ItemDataRole.UserRole)
-        super().accept()
+        # per-printer options, filled by _update_capabilities
+        self.quality_combo = QComboBox()
+        form.addRow("Quality", self.quality_combo)
+        self.source_combo = QComboBox()
+        form.addRow("Paper source", self.source_combo)
+        self.mediatype_combo = QComboBox()
+        form.addRow("Media type", self.mediatype_combo)
+
+        self.scaling_combo = QComboBox()
+        self.scaling_combo.setToolTip(
+            "How content is scaled to the paper; Custom enables the\n"
+            "percentage below"
+        )
+        for label, value in SCALING_CHOICES:
+            self.scaling_combo.addItem(label, value)
+        form.addRow("Scaling", self.scaling_combo)
+
+        self.scale_spin = QSpinBox()
+        self.scale_spin.setRange(25, 400)
+        self.scale_spin.setSuffix(" %")
+        self.scale_spin.setValue(100)
+        self.scale_spin.setEnabled(False)  # only with Scaling = Custom
+        self.scale_spin.setToolTip(
+            "Content scale for Scaling = Custom, centered on the page "
+            "(and inside the margins when set)"
+        )
+        self.scaling_combo.currentIndexChanged.connect(
+            lambda: self.scale_spin.setEnabled(
+                self.scaling_combo.currentData() == "custom"
+            )
+        )
+        form.addRow("Scale", self.scale_spin)
+
+        self.pageset_combo = QComboBox()
+        self.pageset_combo.setToolTip(
+            "Print only odd or even pages — for manual double-sided\n"
+            "printing: print odd, re-feed the stack, print even"
+        )
+        for label, value in PAGE_SET_CHOICES:
+            self.pageset_combo.addItem(label, value)
+        form.addRow("Page set", self.pageset_combo)
+
+        self.collate_check = QCheckBox("Collate copies")
+        self.collate_check.setToolTip(
+            "Print complete sets (1,2,3 / 1,2,3) instead of page groups"
+        )
+        self.collate_check.setEnabled(False)  # only meaningful for copies > 1
+        self.copies_spin.valueChanged.connect(
+            lambda v: self.collate_check.setEnabled(v > 1)
+        )
+        form.addRow("", self.collate_check)
+
+        self.reverse_check = QCheckBox("Reverse order")
+        self.reverse_check.setToolTip("Print the last page first")
+        form.addRow("", self.reverse_check)
+
+        side_layout.addWidget(self.more_group)
+
+        margins_group = QGroupBox("Margins (mm)")
+        margins_form = QFormLayout(margins_group)
+        self.margin_spins: dict[str, QSpinBox] = {}
+        for key, label in (
+            ("left", "Left"),
+            ("right", "Right"),
+            ("top", "Top"),
+            ("bottom", "Bottom"),
+        ):
+            spin = QSpinBox()
+            spin.setRange(0, 50)
+            spin.setSuffix(" mm")
+            spin.setSpecialValueText("Default")
+            spin.setToolTip(
+                "Minimum distance from the paper edge; the content is "
+                "scaled to fit inside the margins"
+            )
+            self.margin_spins[key] = spin
+            margins_form.addRow(label, spin)
+        self.placement_combo = QComboBox()
+        self.placement_combo.addItem("Shrink to fit margins", "fit")
+        self.placement_combo.addItem("Shift by margins (may clip)", "shift")
+        self.placement_combo.addItem("Center right of punch line", "hole")
+        self.placement_combo.addItem(
+            "Center on punch line, no shrink (may clip)", "hole-clip"
+        )
+        self.placement_combo.setToolTip(
+            "Fit: shrink content into the margins. Shift: move it at "
+            "original size. Punch line: center the measured content "
+            "between the 18 mm hole line and the far edge (margins "
+            "above are ignored)"
+        )
+        self.placement_combo.currentIndexChanged.connect(
+            lambda: [
+                spin.setEnabled(
+                    not self.placement_combo.currentData().startswith("hole")
+                )
+                for spin in self.margin_spins.values()
+            ]
+        )
+        margins_form.addRow("Placement", self.placement_combo)
+        self.mirror_check = QCheckBox("Mirror margins (binding)")
+        self.mirror_check.setToolTip(
+            "For double-sided printing into a binder: even pages get the "
+            "left margin on the right, keeping the binding edge clear on "
+            "both sides of the sheet"
+        )
+        margins_form.addRow("", self.mirror_check)
+        self.hole_check = QCheckBox("Punch hole guide (18 mm)")
+        self.hole_check.setToolTip(
+            "Shows a dashed line 18 mm from the binding edge in the "
+            "preview as a hole-punching reference; alternates sides "
+            "when margins are mirrored. Not printed."
+        )
+        margins_form.addRow("", self.hole_check)
+        side_layout.addWidget(margins_group)
+        side_layout.addStretch(1)
+
+        settings_row = QHBoxLayout()
+        self.last_button = QPushButton("Use last print's settings")
+        self.last_button.setEnabled(printing.load_last_job() is not None)
+        self.last_button.clicked.connect(self._load_last_settings)
+        settings_row.addWidget(self.last_button, stretch=1)
+        reset_button = QPushButton("Reset")
+        reset_button.setToolTip("Reset all print options to their defaults")
+        reset_button.clicked.connect(self._reset_settings)
+        settings_row.addWidget(reset_button)
+        side_layout.addLayout(settings_row)
+
+        self.print_button = QPushButton("Print")
+        self.print_button.setDefault(True)
+        self.print_button.setEnabled(False)
+        self.print_button.clicked.connect(self.do_print)
+        side_layout.addWidget(self.print_button)
+
+        side_scroll = QScrollArea(self)
+        side_scroll.setWidget(side)
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFixedWidth(320)
+        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        central = QWidget(self)
+        layout = QHBoxLayout(central)
+        layout.addLayout(viewer_column, stretch=1)
+        layout.addWidget(side_scroll)
+        self.setCentralWidget(central)
+
+        self._caps_cache: dict[str, dict[str, printing.PPDOption]] = {}
+        self.printer_combo.currentTextChanged.connect(self._update_capabilities)
+
+        # debounce option changes before re-running the preview transform
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(500)
+        self._preview_timer.timeout.connect(self._apply_layout_preview)
+        self.range_edit.textChanged.connect(self._preview_timer.start)
+        for combo in (
+            self.media_combo,
+            self.orientation_combo,
+            self.nup_combo,
+            self.nup_layout_combo,
+            self.pageset_combo,
+            self.scaling_combo,
+        ):
+            combo.currentIndexChanged.connect(self._preview_timer.start)
+        self.reverse_check.toggled.connect(self._preview_timer.start)
+        for spin in self.margin_spins.values():
+            spin.valueChanged.connect(self._preview_timer.start)
+        self.placement_combo.currentIndexChanged.connect(self._preview_timer.start)
+        self.mirror_check.toggled.connect(self._preview_timer.start)
+        self.hole_check.toggled.connect(self._preview_timer.start)
+        self.scale_spin.valueChanged.connect(self._preview_timer.start)
+        self.scale_spin.valueChanged.connect(self._update_more_button)
+
+        # keep the collapsed "more options" button honest about what's set
+        for combo in (
+            self.media_combo,
+            self.orientation_combo,
+            self.nup_combo,
+            self.nup_layout_combo,
+            self.quality_combo,
+            self.source_combo,
+            self.mediatype_combo,
+            self.scaling_combo,
+            self.pageset_combo,
+        ):
+            combo.currentIndexChanged.connect(self._update_more_button)
+        self.collate_check.toggled.connect(self._update_more_button)
+        self.reverse_check.toggled.connect(self._update_more_button)
+
+        self.setStatusBar(QStatusBar(self))
+        self.refresh_printers()
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+
+        open_action = QAction("&Open…", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.triggered.connect(self.open_dialog)
+        file_menu.addAction(open_action)
+
+        if self.zotero_storage:
+            zotero_action = QAction("Open from &Zotero…", self)
+            zotero_action.setShortcut("Ctrl+Shift+O")
+            zotero_action.triggered.connect(self.open_zotero_dialog)
+            file_menu.addAction(zotero_action)
+
+        print_action = QAction("&Print", self)
+        print_action.setShortcut(QKeySequence.StandardKey.Print)
+        print_action.triggered.connect(self.do_print)
+        file_menu.addAction(print_action)
+
+        file_menu.addSeparator()
+        quit_action = QAction("&Quit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+        view_menu = self.menuBar().addMenu("&View")
+
+        zoom_in_action = QAction("Zoom &In", self)
+        zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        zoom_in_action.triggered.connect(self.zoom_in)
+        view_menu.addAction(zoom_in_action)
+
+        zoom_out_action = QAction("Zoom &Out", self)
+        zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        zoom_out_action.triggered.connect(self.zoom_out)
+        view_menu.addAction(zoom_out_action)
+
+        fit_action = QAction("&Fit Width", self)
+        fit_action.setShortcut("Ctrl+0")
+        fit_action.triggered.connect(self.fit_width)
+        view_menu.addAction(fit_action)
+
+        help_menu = self.menuBar().addMenu("&Help")
+
+        guide_action = QAction("&User Guide", self)
+        guide_action.setShortcut(QKeySequence.StandardKey.HelpContents)
+        guide_action.triggered.connect(self.show_help)
+        help_menu.addAction(guide_action)
+
+        about_action = QAction("&About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def show_help(self) -> None:
+        UserGuideDialog(self).exec()
+
+    def show_about(self) -> None:
+        AboutDialog(self).exec()
+
+    # ---------- zoom ----------
+
+    def current_zoom(self) -> float:
+        if self.zoomMode() == QPdfView.ZoomMode.Custom:
+            return self.zoomFactor()
+        # estimate the effective fit-to-width factor so the first manual
+        # zoom step starts from what is on screen instead of jumping to 1.0
+        doc = self.document()
+        if doc is not None and doc.pageCount() > 0:
+            page_px = doc.pagePointSize(0).width() / 72.0 * self.logicalDpiX()
+            if page_px > 0:
+                return max(MIN_ZOOM, (self.viewport().width() - 20) / page_px)
+        return 1.0
+
+    def apply_zoom(self, factor: float, anchor: QPoint | None = None) -> None:
+        old = self.current_zoom()
+        factor = max(MIN_ZOOM, min(MAX_ZOOM, factor))
+        if anchor is None:
+            anchor = self.viewport().rect().center()
+        hbar = self.horizontalScrollBar()
+        vbar = self.verticalScrollBar()
+        # document coordinates currently under the anchor point
+        doc_x = hbar.value() + anchor.x()
+        doc_y = vbar.value() + anchor.y()
+        self._stop_scroll_anims()
+        # suppress repaints between the zoom and the scroll correction so
+        # the view doesn't briefly show the wrongly-positioned content
+        self.setUpdatesEnabled(False)
+        try:
+            self.setZoomMode(QPdfView.ZoomMode.Custom)
+            self.setZoomFactor(factor)
+            ratio = factor / old
+            hbar.setValue(round(doc_x * ratio - anchor.x()))
+            vbar.setValue(round(doc_y * ratio - anchor.y()))
+        finally:
+            self.setUpdatesEnabled(True)
+        self.zoom_changed.emit(factor)
+
+    def zoom_in(self, anchor: QPoint | None = None) -> None:
+        self.apply_zoom(self.current_zoom() * ZOOM_STEP, anchor)
+
+    def zoom_out(self, anchor: QPoint | None = None) -> None:
+        self.apply_zoom(self.current_zoom() / ZOOM_STEP, anchor)
+
+    def fit_width(self) -> None:
+        self._stop_scroll_anims()
+        self.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self.zoom_changed.emit(0.0)
+
+    # ---------- pinch-to-zoom ----------
+
+    def event(self, e):
+        if e.type() == QEvent.Type.NativeGesture:
+            if e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self._on_pinch(1.0 + e.value(), e.position().toPoint())
+                return True
+        elif e.type() == QEvent.Type.Gesture:
+            pinch = e.gesture(Qt.GestureType.PinchGesture)
+            if isinstance(pinch, QPinchGesture):
+                if (
+                    pinch.changeFlags()
+                    & QPinchGesture.ChangeFlag.ScaleFactorChanged
+                ):
+                    anchor = self.mapFromGlobal(pinch.centerPoint().toPoint())
+                    self._on_pinch(pinch.scaleFactor(), anchor)
+                return True
+        return super().event(e)
+
+    def _on_pinch(self, scale: float, anchor: QPoint) -> None:
+        self._pinch_pending *= scale
+        self._pinch_anchor = anchor
+        if not self._pinch_timer.isActive():
+            self._flush_pinch()
+            self._pinch_timer.start()
+
+    def _flush_pinch(self) -> None:
+        if abs(self._pinch_pending - 1.0) > 1e-4:
+            self.apply_zoom(
+                self.current_zoom() * self._pinch_pending, self._pinch_anchor
+            )
+        self._pinch_pending = 1.0
+
+    # ---------- scrolling ----------
+
+    def _stop_scroll_anims(self) -> None:
+        self._wheel_anim.stop()
+        self._glide_anim.stop()
+        self._scroll_velocity = 0.0
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt naming)
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # proportional to the delta so touchpad Ctrl+scroll zooms
+            # smoothly instead of one full step per event
+            dy = event.angleDelta().y()
+            if dy:
+                scale = ZOOM_STEP ** (dy / 120.0)
+                self._on_pinch(scale, event.position().toPoint())
+            event.accept()
+            return
+
+        pixel_delta = event.pixelDelta() * SCROLL_MULTIPLIER
+        phase = event.phase()
+        if not pixel_delta.isNull() or phase != Qt.ScrollPhase.NoScrollPhase:
+            # touchpad: track the fingers, then glide on lift-off
+            self._wheel_anim.stop()
+            self._glide_anim.stop()
+            vbar = self.verticalScrollBar()
+            hbar = self.horizontalScrollBar()
+            if pixel_delta.y():
+                vbar.setValue(vbar.value() - pixel_delta.y())
+            if pixel_delta.x():
+                hbar.setValue(hbar.value() - pixel_delta.x())
+
+            if phase == Qt.ScrollPhase.ScrollBegin:
+                self._scroll_clock.start()
+                self._scroll_velocity = 0.0
+            elif phase == Qt.ScrollPhase.ScrollUpdate:
+                if self._scroll_clock.isValid():
+                    ms = max(1, self._scroll_clock.restart())
+                else:
+                    self._scroll_clock.start()
+                    ms = 16
+                # low-pass filter so one jittery event doesn't set the glide
+                velocity = pixel_delta.y() / ms
+                self._scroll_velocity = (
+                    0.6 * self._scroll_velocity + 0.4 * velocity
+                )
+            elif phase == Qt.ScrollPhase.ScrollEnd:
+                self._start_glide()
+            event.accept()
+            return
+
+        # classic mouse wheel: animate the step instead of jumping
+        steps = event.angleDelta().y() / 120.0
+        if steps:
+            self._animate_wheel_step(steps * WHEEL_STEP_PX)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def _animate_wheel_step(self, delta_px: float) -> None:
+        bar = self.verticalScrollBar()
+        if self._wheel_anim.state() == QAbstractAnimation.State.Running:
+            target = float(self._wheel_anim.endValue())
+        else:
+            target = float(bar.value())
+        target = min(bar.maximum(), max(bar.minimum(), target - delta_px))
+        self._glide_anim.stop()
+        self._wheel_anim.stop()
+        self._wheel_anim.setStartValue(float(bar.value()))
+        self._wheel_anim.setEndValue(target)
+        self._wheel_anim.setDuration(300)
+        self._wheel_anim.start()
+
+    def _start_glide(self) -> None:
+        velocity = self._scroll_velocity  # px/ms at lift-off
+        self._scroll_velocity = 0.0
+        if abs(velocity) < 0.05:
+            return
+        bar = self.verticalScrollBar()
+        distance = max(-12000.0, min(12000.0, velocity * 1000))
+        target = min(bar.maximum(), max(bar.minimum(), bar.value() - distance))
+        duration = int(min(2500, max(600, abs(distance) * 1.1)))
+        self._glide_anim.stop()
+        self._glide_anim.setStartValue(float(bar.value()))
+        self._glide_anim.setEndValue(float(target))
+        self._glide_anim.setDuration(duration)
+        self._glide_anim.start()
+
+
+class _TransformWorker(QThread):
+    """Runs the preview transform pipeline off the GUI thread."""
+
+    done = pyqtSignal(object, object)  # (result path | None, error | None)
+
+    def __init__(self, task, parent=None):
+        super().__init__(parent)
+        self._task = task
+
+    def run(self):  # noqa: A003 (Qt naming)
+        try:
+            self.done.emit(self._task(), None)
+        except printing.PrintError as exc:
+            self.done.emit(None, str(exc))
+        except Exception as exc:  # noqa: BLE001 — an exception escaping a
+            # QThread aborts the whole process, so nothing may get through
+            self.done.emit(None, f"{type(exc).__name__}: {exc}")
 
 
 class MainWindow(QMainWindow):
@@ -596,7 +1074,7 @@ class MainWindow(QMainWindow):
         self.current_path: str | None = None
         self._subset_dir: tempfile.TemporaryDirectory | None = None
         self._showing_transformed = False
-        self._zotero_dialog: ZoteroDialog | None = None
+        self._zotero_dialog: ZoteroPickerDialog | None = None
         self._preview_worker: _TransformWorker | None = None
         self._preview_dirty = False
         self._print_worker: _TransformWorker | None = None
@@ -1366,7 +1844,7 @@ class MainWindow(QMainWindow):
         # reuse the dialog so the picked collection, search text and
         # scroll position are right where the user left them
         if self._zotero_dialog is None:
-            self._zotero_dialog = ZoteroDialog(self.zotero_storage, self)
+            self._zotero_dialog = ZoteroPickerDialog(self.zotero_storage, self)
         dialog = self._zotero_dialog
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
             self.load_pdf(dialog.selected_path)
@@ -1540,7 +2018,8 @@ class MainWindow(QMainWindow):
         if error is not None:
             self.print_button.setText("Print")
             self.statusBar().showMessage(f"Print failed: {error}")
-            QMessageBox.critical(self, "Print failed", error)
+            if show_print_error(self, error, detail=job.printer) == "refresh":
+                self.refresh_printers()
             return
         printing.save_last_job(job)
         self.last_button.setEnabled(True)
