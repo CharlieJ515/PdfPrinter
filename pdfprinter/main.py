@@ -7,7 +7,7 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
-from . import __version__
+from . import __version__, theme
 from .window import MainWindow
 
 
@@ -24,6 +24,10 @@ def main() -> int:
     app = QApplication(sys.argv[:1] + qt_args)
     app.setApplicationName("pdfprinter")
     app.setDesktopFileName("pdfprinter")
+
+    theme.load_fonts(app)
+    theme.apply_palette(app)
+    app.setStyleSheet(theme.stylesheet())
 
     window = MainWindow(args.pdf)
     window.show()
