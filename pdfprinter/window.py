@@ -756,6 +756,78 @@ class ZoomablePdfView(QPdfView):
         self._glide_anim.start()
 
 
+class SuffixSpinBox(QSpinBox):
+    """Spin box whose unit suffix is not editable ground.
+
+    Clicking while the special value ("Default") is shown selects the
+    whole text so typing replaces it; once a number with a unit suffix
+    is shown, the cursor and any selection are kept out of the suffix.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._clamping = False
+        self.lineEdit().cursorPositionChanged.connect(self._clamp_cursor)
+        self.lineEdit().installEventFilter(self)
+
+    def _showing_special(self) -> bool:
+        return bool(self.specialValueText()) and self.value() == self.minimum()
+
+    def _cursor_limit(self) -> int:
+        text = self.lineEdit().text()
+        suffix = self.suffix()
+        if suffix and text.endswith(suffix) and not self._showing_special():
+            return len(text) - len(suffix)
+        return len(text)
+
+    def _clamp_cursor(self, _old: int, new: int) -> None:
+        if self._clamping:
+            return
+        edit = self.lineEdit()
+        limit = self._cursor_limit()
+        self._clamping = True
+        try:
+            if edit.hasSelectedText():
+                start = edit.selectionStart()
+                end = start + len(edit.selectedText())
+                if start > limit or end > limit:
+                    start = min(start, limit)
+                    edit.setSelection(start, min(end, limit) - start)
+            elif new > limit:
+                edit.setCursorPosition(limit)
+        finally:
+            self._clamping = False
+
+    def _clamp_now(self) -> None:
+        """Apply the suffix clamp to wherever the cursor currently is.
+
+        Needed because focus-in and programmatic text updates can park
+        the cursor at the end without emitting cursorPositionChanged.
+        """
+        edit = self.lineEdit()
+        self._clamp_cursor(edit.cursorPosition(), edit.cursorPosition())
+
+    def _after_entry(self) -> None:
+        if self._showing_special():
+            self.selectAll()
+        else:
+            self._clamp_now()
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt naming)
+        # clicks and focus land on the child line edit, not on the spin
+        # box itself, so watch them there
+        if obj is self.lineEdit() and event.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.MouseButtonPress,
+        ):
+            QTimer.singleShot(0, self._after_entry)
+        return super().eventFilter(obj, event)
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 (Qt naming)
+        super().stepBy(steps)
+        QTimer.singleShot(0, self._clamp_now)
+
+
 class _TransformWorker(QThread):
     """Runs the preview transform pipeline off the GUI thread."""
 
@@ -1406,7 +1478,7 @@ class MainWindow(QMainWindow):
         )
         for label, value in SCALING_CHOICES:
             self.scaling_combo.addItem(label, value)
-        self.scale_spin = QSpinBox()
+        self.scale_spin = SuffixSpinBox()
         self.scale_spin.setRange(25, 400)
         self.scale_spin.setSuffix(" %")
         self.scale_spin.setValue(100)
@@ -1476,7 +1548,7 @@ class MainWindow(QMainWindow):
             ("top", "Top"),
             ("bottom", "Bottom"),
         ):
-            spin = QSpinBox()
+            spin = SuffixSpinBox()
             spin.setRange(0, 50)
             spin.setSuffix(" mm")
             spin.setSpecialValueText("Default")
