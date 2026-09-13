@@ -165,6 +165,11 @@ whatever crosses the opposite edge is cut off.</li>
 and centres it, at original size, between the 18&nbsp;mm punch line and
 the far edge; shrinks only if the ink is wider than that zone. Margin
 values are ignored.</li>
+{_LI}<b>Center on content</b> — like punch-line centring, but the
+content box is measured from what actually renders: border rules that
+outrun the text, marks at the page edge and faint rotated margin
+watermarks are ignored, so decorated journal pages centre on their
+real text and figures.</li>
 {_LI}<b>Center on punch line, no shrink</b> — same centring but never
 shrinks; both edges may clip.</li>
 </ul>

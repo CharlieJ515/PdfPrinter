@@ -348,6 +348,157 @@ def margins_active(job: PrintJob) -> bool:
     )
 
 
+_content_bbox_cache: dict[tuple[str, float], list | None] = {}
+
+
+def content_ink_boxes(src: str) -> list[tuple[float, float, float, float]]:
+    """Ink boxes of what actually renders, ignoring page furniture.
+
+    Unlike :func:`ink_boxes` (gs bbox device, which counts every marking
+    operation including invisible ones), this rasterizes each page the
+    way the print pipeline will and measures the visible ink, dropping
+    decorations that commonly inflate the box: marks at the page edge,
+    thin border rules that outrun the content, tall narrow rotated
+    margin watermarks, faint gray furniture, and stray specks. Saturated
+    color counts as ink even when light, so pale figures survive.
+
+    Falls back to :func:`ink_boxes` when numpy or rasterization is
+    unavailable, and per page to the raw visible extents whenever the
+    filtered box looks implausible.
+    """
+    key = (src, os.path.getmtime(src))
+    cached = _content_bbox_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        import numpy as np
+    except ImportError:
+        return ink_boxes(src)
+    dpi = 100
+    try:
+        with tempfile.TemporaryDirectory(prefix="pdfprinter-cb-") as tmpdir:
+            result = subprocess.run(
+                ["gs", "-q", "-dBATCH", "-dNOPAUSE", "-dSAFER",
+                 "-sDEVICE=ppmraw", f"-r{dpi}",
+                 "-o", os.path.join(tmpdir, "p%04d.ppm"), "-f", src],
+                capture_output=True, timeout=300,
+            )
+            if result.returncode != 0:
+                return ink_boxes(src)
+            boxes = []
+            index = 1
+            while True:
+                path = os.path.join(tmpdir, f"p{index:04d}.ppm")
+                if not os.path.exists(path):
+                    break
+                boxes.append(_content_box_of_page(np, path, dpi))
+                index += 1
+    except (OSError, subprocess.TimeoutExpired):
+        return ink_boxes(src)
+    if not boxes:
+        return ink_boxes(src)
+    _content_bbox_cache[key] = boxes
+    return boxes
+
+
+def _read_ppm(np, path):
+    with open(path, "rb") as fh:
+        if fh.readline().strip() != b"P6":
+            return None
+        line = fh.readline()
+        while line.startswith(b"#"):
+            line = fh.readline()
+        w, h = map(int, line.split())
+        fh.readline()  # maxval
+        return np.frombuffer(fh.read(), dtype=np.uint8).reshape(h, w, 3)
+
+
+def _longest_runs(np, mask, axis):
+    m = mask if axis == 0 else mask.T
+    run = np.zeros(m.shape[1], dtype=np.int32)
+    best = np.zeros(m.shape[1], dtype=np.int32)
+    for row in m:
+        run = np.where(row, run + 1, 0)
+        best = np.maximum(best, run)
+    return best
+
+
+def _bands(active):
+    i, n, out = 0, len(active), []
+    while i < n:
+        if active[i]:
+            j = i
+            while j + 1 < n and active[j + 1]:
+                j += 1
+            out.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def _zero_bands(out, flags, limit, axis):
+    for a, b in _bands(flags):
+        if b - a + 1 <= limit:
+            if axis == 0:
+                out[:, a:b + 1] = False
+            else:
+                out[a:b + 1, :] = False
+
+
+def _content_box_of_page(np, path, dpi):
+    rgb = _read_ppm(np, path)
+    scale = 72.0 / dpi
+    if rgb is None:
+        return (0.0, 0.0, 1.0, 1.0)
+    h, w = rgb.shape[:2]
+    page = (0.0, 0.0, w * scale, h * scale)
+    lum = rgb.astype(np.int16).mean(axis=2)
+    chroma = (
+        rgb.max(axis=2).astype(np.int16) - rgb.min(axis=2).astype(np.int16)
+    )
+    ink = (lum < 200) | (chroma > 40)  # dark, or saturated even if light
+    if not ink.any():
+        return page
+
+    def extents(mask):
+        ys, xs = np.nonzero(mask)
+        return (
+            xs.min() * scale, (h - 1 - ys.max()) * scale,
+            (xs.max() + 1) * scale, (h - ys.min()) * scale,
+        )
+
+    raw = extents(ink)
+    out = ink.copy()
+    edge = max(2, dpi // 50)
+    out[:edge, :] = out[-edge:, :] = False
+    out[:, :edge] = out[:, -edge:] = False
+    _zero_bands(out, _longest_runs(np, out, 0) > 0.22 * h, 8, 0)
+    _zero_bands(out, _longest_runs(np, out, 1) > 0.22 * w, 8, 1)
+    for a, b in _bands(out.any(axis=0)):
+        band_rows = np.flatnonzero(out[:, a:b + 1].any(axis=1))
+        if (
+            b - a + 1 <= 14
+            and len(band_rows)
+            and band_rows[-1] - band_rows[0] >= 0.6 * h
+        ):
+            out[:, a:b + 1] = False
+    for axis in (0, 1):
+        active = out.any(axis=1 - axis)
+        for a, b in _bands(active):
+            chunk = out[:, a:b + 1] if axis == 0 else out[a:b + 1, :]
+            if chunk.sum() < 15:
+                chunk[:] = False
+    if not out.any():
+        return raw
+    box = extents(out)
+    # sanity: a filtered box far smaller than the visible ink means the
+    # heuristics ate real content — trust the raw extents instead
+    if (box[2] - box[0]) < 0.5 * (raw[2] - raw[0]):
+        return raw
+    return box
+
+
 def needs_gs_pass(job: PrintJob) -> bool:
     return (
         margins_active(job)
@@ -465,7 +616,12 @@ def _apply_margins_pikepdf(src: str, dest: str, job: PrintJob) -> None:
     bottom = job.margin_bottom * MM_TO_PT
     user_scale = job.scale_percent / 100.0
 
-    inks = ink_boxes(src) if job.margin_mode.startswith("hole") else []
+    if job.margin_mode == "hole-content":
+        inks = content_ink_boxes(src)
+    elif job.margin_mode.startswith("hole"):
+        inks = ink_boxes(src)
+    else:
+        inks = []
 
     with pikepdf.open(src) as pdf:
         for index, page in enumerate(pdf.pages):

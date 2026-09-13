@@ -133,6 +133,11 @@ PLACEMENT_CAPTIONS = {
         "Ink centred between the punch line and the far edge; sides swap "
         "on even pages. Margin values ignored."
     ),
+    "hole-content": (
+        "Like punch-line centring, but measured on the page's real "
+        "content — border rules, edge marks and faint margin "
+        "watermarks are ignored."
+    ),
     "hole-clip": "Original size; both edges may clip",
 }
 
@@ -1609,6 +1614,9 @@ class MainWindow(QMainWindow):
         self.placement_combo.addItem("Shift by margins (may clip)", "shift")
         self.placement_combo.addItem("Center right of punch line", "hole")
         self.placement_combo.addItem(
+            "Center on content (skip decorations)", "hole-content"
+        )
+        self.placement_combo.addItem(
             "Center on punch line, no shrink (may clip)", "hole-clip"
         )
         self.placement_combo.setToolTip(
@@ -1960,7 +1968,10 @@ class MainWindow(QMainWindow):
 
     def _update_placement_diagram(self) -> None:
         mode = self.placement_combo.currentData() or "fit"
-        self.placement_diagram.set_state(mode, self.mirror_check.isChecked())
+        diagram_mode = "hole" if mode == "hole-content" else mode
+        self.placement_diagram.set_state(
+            diagram_mode, self.mirror_check.isChecked()
+        )
         self.placement_caption.setText(
             PLACEMENT_CAPTIONS.get(mode, PLACEMENT_CAPTIONS["fit"])
         )
@@ -2537,6 +2548,7 @@ class MainWindow(QMainWindow):
         placement_names = {
             "shift": "Shift by margins",
             "hole": "Center right of punch line",
+            "hole-content": "Center on content beside punch line",
             "hole-clip": "Center on punch line (no shrink)",
         }
 
