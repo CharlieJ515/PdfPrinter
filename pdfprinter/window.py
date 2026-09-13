@@ -772,6 +772,9 @@ class SuffixSpinBox(QSpinBox):
         self.lineEdit().installEventFilter(self)
         # plain field at rest; step arrows appear under the cursor
         self.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        # no blinking caret while the whole value is selected
+        self.lineEdit().setProperty("hideCaretWhenSelected", True)
+        self.lineEdit().selectionChanged.connect(self.lineEdit().update)
 
     def enterEvent(self, event):  # noqa: N802 (Qt naming)
         super().enterEvent(event)

@@ -717,6 +717,19 @@ class AppStyle(QProxyStyle):
             return icon(name, INK, 16)
         return super().standardIcon(sp, option, widget)
 
+    def pixelMetric(self, metric, option=None, widget=None):  # noqa: N802
+        # fields opting in via the property hide the text caret while
+        # their content is selected (select-all on click looks calmer)
+        if (
+            metric == QStyle.PixelMetric.PM_TextCursorWidth
+            and widget is not None
+            and widget.property("hideCaretWhenSelected")
+            and hasattr(widget, "hasSelectedText")
+            and widget.hasSelectedText()
+        ):
+            return 0
+        return super().pixelMetric(metric, option, widget)
+
 
 # --------------------------------------------------------------------------
 # stylesheet
