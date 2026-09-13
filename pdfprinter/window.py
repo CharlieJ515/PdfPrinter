@@ -1753,9 +1753,6 @@ class MainWindow(QMainWindow):
         self.placement_combo.currentIndexChanged.connect(self._on_placement_changed)
         self.mirror_check.toggled.connect(self._preview_timer.start)
         self.mirror_check.toggled.connect(self._update_placement_diagram)
-        self.placement_combo.currentIndexChanged.connect(
-            self._on_placement_changed
-        )
         self.hole_check.toggled.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._update_more_button)
@@ -1964,17 +1961,15 @@ class MainWindow(QMainWindow):
         self._update_header()
 
     def _on_placement_changed(self) -> None:
-        hole = self.placement_combo.currentData().startswith("hole")
+        mode = self.placement_combo.currentData() or ""
+        hole = mode.startswith("hole")
         for spin in self.margin_spins.values():
             spin.setEnabled(not hole)
-        self._update_placement_diagram()
-
-    def _on_placement_changed(self) -> None:
-        # punch placements turn the guide on as a starting point; the
-        # checkbox stays independent so it can be switched off again
-        mode = self.placement_combo.currentData() or ""
-        if mode.startswith("hole"):
+        if hole:
+            # punch placements turn the guide on as a starting point;
+            # the checkbox stays independent and can be switched off
             self.hole_check.setChecked(True)
+        self._update_placement_diagram()
 
     def _update_placement_diagram(self) -> None:
         mode = self.placement_combo.currentData() or "fit"
