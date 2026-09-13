@@ -129,7 +129,7 @@ Zoom anchors on the cursor or pinch centre.</li>
 
 {_section("Print options")}
 {_UL}
-{_LI}<b>Pages</b> — ranges like {_CODE}1-4,7</span>; the preview shows
+{_LI}<b>Pages</b> — ranges like {_CODE}1-4,7</span> ({_CODE}4-</span> prints to the end); the preview shows
 only the selected pages.</li>
 {_LI}<b>Duplex</b> — greyed out on printers without a duplex unit; use
 <i>Page set</i> odd/even to print double-sided manually (print odd pages,

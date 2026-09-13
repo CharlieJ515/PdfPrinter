@@ -270,10 +270,22 @@ def _parse_hw_margins(ppd: str) -> tuple[float, float, float, float] | None:
 
 
 def validate_page_range(text: str) -> bool:
-    """Accept forms like "3", "1-4", "1-4,7,10-12"."""
+    """Accept forms like "3", "1-4", "1-4,7,10-12" and open ends "4-"."""
     if not text:
         return True
-    return re.fullmatch(r"\d+(-\d+)?(,\d+(-\d+)?)*", text.replace(" ", "")) is not None
+    return (
+        re.fullmatch(r"\d+(-\d*)?(,\d+(-\d*)?)*", text.replace(" ", ""))
+        is not None
+    )
+
+
+def _expand_open_ranges(text: str, end: str) -> str:
+    """Rewrite open-ended items ("4-") with an explicit end marker.
+
+    CUPS's pdftopdf silently drops "4-" style items, but clamps
+    oversized ends, so "9999" works there; qpdf wants "z".
+    """
+    return re.sub(r"(\d+)-(?=,|$)", rf"\g<1>-{end}", text.replace(" ", ""))
 
 
 PDFTOPDF = "/usr/lib/cups/filter/pdftopdf"
@@ -299,7 +311,7 @@ def layout_options(job: PrintJob) -> list[str]:
     """
     parts: list[str] = []
     if job.page_range and validate_page_range(job.page_range):
-        parts.append(f"page-ranges={job.page_range.replace(' ', '')}")
+        parts.append(f"page-ranges={_expand_open_ranges(job.page_range, '9999')}")
     if job.page_set:
         parts.append(f"page-set={job.page_set}")
     if job.number_up > 1:
@@ -642,7 +654,10 @@ def make_page_subset(src: str, page_range: str, dest: str) -> None:
     """
     if not page_range or not validate_page_range(page_range):
         raise PrintError(f"Invalid page range: {page_range!r}")
-    cmd = ["qpdf", src, "--pages", ".", page_range.replace(" ", ""), "--", dest]
+    cmd = [
+        "qpdf", src, "--pages", ".",
+        _expand_open_ranges(page_range, "z"), "--", dest,
+    ]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:

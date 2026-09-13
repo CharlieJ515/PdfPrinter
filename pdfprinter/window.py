@@ -141,7 +141,7 @@ DUPLEX_UNSUPPORTED = (
     "double-sided manually"
 )
 RANGE_HINT = "Ranges like 1-4,7 — the preview follows"
-RANGE_ERROR = "Must look like 1-4,7,10-12"
+RANGE_ERROR = "Must look like 1-4,7,10-12 (or 4- to the end)"
 EMPTY_TITLE = "What you see is what prints"
 EMPTY_BODY = (
     "Open a PDF to preview it through the real print pipeline — page "
