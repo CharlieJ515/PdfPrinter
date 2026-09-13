@@ -339,6 +339,20 @@ _icon_cache: dict[tuple[str, str, int], QIcon] = {}
 _pixmap_cache: dict[tuple[str, str, int], QPixmap] = {}
 
 
+#: Icons blown up well past 14 px look washed out with a hairline stroke;
+#: these grow theirs optically (exponent of the size ratio above 16 px).
+_OPTICAL_STROKE: Final[dict[str, float]] = {"doc-plus": 0.45}
+
+
+def _pen_width(name: str, size: int) -> float:
+    """Stroke width in viewbox units — 1.5 logical px, optics aside."""
+    width = 36.0 / max(size, 1)
+    exponent = _OPTICAL_STROKE.get(name)
+    if exponent is not None and size > 16:
+        width *= (size / 16.0) ** exponent
+    return width
+
+
 def icon_names() -> tuple[str, ...]:
     """Every icon name :func:`icon` knows about."""
     return tuple(sorted(_PAINTERS))
@@ -359,7 +373,7 @@ def pixmap(name: str, color: str = INK, size: int = 14) -> QPixmap:
     # the painter already maps logical → device through the pixmap's dpr
     painter.scale(size / _VIEWBOX, size / _VIEWBOX)
     pen = QPen(QColor(color))
-    pen.setWidthF(36.0 / max(size, 1))  # 1.5 logical px at any size
+    pen.setWidthF(_pen_width(name, size))
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
@@ -485,17 +499,19 @@ def _i_history(p: QPainter, c: QColor) -> None:
 
 
 def _i_refresh(p: QPainter, c: QColor) -> None:
-    rect = QRectF(4.4, 4.4, 15.2, 15.2)
-    p.drawArc(rect, int(100 * 16), int(155 * 16))
-    p.drawArc(rect, int(280 * 16), int(155 * 16))
+    # two arcs with wide gaps, closed by solid heads: still reads as
+    # circular arrows when the whole glyph is only 14 px across
+    rect = QRectF(4.6, 4.6, 14.8, 14.8)
+    p.drawArc(rect, int(115 * 16), int(130 * 16))  # left side
+    p.drawArc(rect, int(295 * 16), int(130 * 16))  # right side
     p.save()
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(c)
-    p.drawPolygon(
-        QPointF(10.6, 2.2), QPointF(14.6, 4.4), QPointF(10.6, 6.6)
+    p.drawPolygon(  # top gap, pointing clockwise (right)
+        QPointF(10.3, 2.0), QPointF(15.9, 4.9), QPointF(10.3, 7.8)
     )
-    p.drawPolygon(
-        QPointF(13.4, 17.4), QPointF(9.4, 19.6), QPointF(13.4, 21.8)
+    p.drawPolygon(  # bottom gap, pointing clockwise (left)
+        QPointF(13.7, 16.2), QPointF(8.1, 19.1), QPointF(13.7, 22.0)
     )
     p.restore()
 
@@ -537,8 +553,13 @@ def _i_doc(p: QPainter, c: QColor) -> None:
 
 def _i_doc_plus(p: QPainter, c: QColor) -> None:
     _page(p)
-    _poly(p, (12, 11.4), (12, 17.4))
-    _poly(p, (9, 14.4), (15, 14.4))
+    pen = QPen(p.pen())  # the plus carries the glyph: draw it heavier
+    pen.setWidthF(pen.widthF() * 1.25)
+    p.save()
+    p.setPen(pen)
+    _poly(p, (12, 10.9), (12, 17.9))
+    _poly(p, (8.5, 14.4), (15.5, 14.4))
+    p.restore()
 
 
 def _i_chevron_down(p: QPainter, c: QColor) -> None:
