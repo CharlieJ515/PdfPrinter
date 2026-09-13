@@ -90,7 +90,7 @@ COLOR_CHOICES = [
 ]
 #: (label, value) for the segmented "Color" control; index 0 is the
 #: "let the printer decide" entry whose label carries the driver default
-COLOR_SEGMENTS = [("Printer", ""), ("Color", "color"), ("Gray", "monochrome")]
+COLOR_SEGMENTS = [("Color", "color"), ("Gray", "monochrome")]
 MEDIA_CHOICES = [
     ("Printer default", ""),
     ("A4", "A4"),
@@ -875,6 +875,7 @@ class MainWindow(QMainWindow):
         self._print_worker: _TransformWorker | None = None
         self._print_stage = "idle"
         self._color_default: str | None = None
+        self._color_user_set = False
         self._printer_hw: tuple[float, float, float, float] | None = None
         self._tracked_job: str | None = None
         self._track_polls = 0
@@ -1422,6 +1423,10 @@ class MainWindow(QMainWindow):
         )
         for label, value in COLOR_SEGMENTS:
             self.color_combo.addItem(label, value)
+        for idx in range(self.color_combo.count()):
+            self.color_combo.button(idx).clicked.connect(
+                self._mark_color_user_set
+            )
         self.color_combo.setToolTip(
             "Color or grayscale output; grayscale is previewed too"
         )
@@ -1890,12 +1895,7 @@ class MainWindow(QMainWindow):
     # ---------- preview mirroring of print options ----------
 
     def _apply_color_preview(self) -> None:
-        # also gray when the printer's own default is grayscale (the
-        # "Printer" segment sends no option but still prints gray)
-        value = self.color_combo.currentData()
-        grayscale = value == "monochrome" or (
-            value == "" and self._color_default == "monochrome"
-        )
+        grayscale = self.color_combo.currentData() == "monochrome"
         # the effect goes on the VIEWPORT, not the view: the floating
         # chips and the zoom pill are children of the view and must keep
         # their own colours while the paper previews in grayscale
@@ -2291,6 +2291,12 @@ class MainWindow(QMainWindow):
             elif any(k in name for k in ("color", "rgb", "cmyk")):
                 color_default = "color"
         self._apply_color_default(color_default)
+        if not self._color_user_set:
+            # untouched selection follows the driver's default
+            self.color_combo.blockSignals(True)
+            self.color_combo.setCurrentData(color_default or "color")
+            self.color_combo.blockSignals(False)
+            self._apply_color_preview()
         self._apply_color_preview()  # the rebuild bypassed the change signal
         self._update_more_button()
 
@@ -2304,20 +2310,21 @@ class MainWindow(QMainWindow):
         if self.placement_combo.currentData().startswith("hole"):
             self._preview_timer.start()
 
+    def _mark_color_user_set(self) -> None:
+        self._color_user_set = True
+
     def _apply_color_default(self, default_value: str | None) -> None:
         """Mark the driver's own colour default on the segmented control.
 
-        The values stay ``""``/``color``/``monochrome`` whatever the
-        printer reports; only the labels move the "(default)" marker, and
-        :attr:`_color_default` remembers what "Printer" actually means so
-        the grayscale preview can follow it.
+        Only two concrete choices exist; the "(default)" marker sits on
+        whichever one the driver reports. Selecting the marked segment
+        sends nothing (the printer decides), which is why no separate
+        "Printer" segment is needed.
         """
         self._color_default = default_value
         self.color_combo.blockSignals(True)
         for index, (label, value) in enumerate(COLOR_SEGMENTS):
-            marked = (
-                default_value is None if value == "" else value == default_value
-            )
+            marked = value == default_value
             self.color_combo.setItemText(
                 index, f"{label} (default)" if marked else label
             )
@@ -2442,7 +2449,11 @@ class MainWindow(QMainWindow):
             copies=self.copies_spin.value(),
             page_range=self.range_edit.text().strip(),
             duplex=self.duplex_combo.currentData(),
-            color_mode=self.color_combo.currentData(),
+            color_mode=(
+                ""
+                if self.color_combo.currentData() == self._color_default
+                else self.color_combo.currentData()
+            ),
             media=self.media_combo.currentData(),
             landscape=self.orientation_combo.currentData(),
             number_up=self.nup_combo.currentData(),
@@ -2579,7 +2590,12 @@ class MainWindow(QMainWindow):
         self.copies_spin.setValue(job.copies)
         self.range_edit.setText(job.page_range)
         pick(self.duplex_combo, job.duplex)
-        pick(self.color_combo, job.color_mode)
+        if job.color_mode:
+            pick(self.color_combo, job.color_mode)
+            self._color_user_set = True
+        else:  # printer default: the marked segment (Color if unknown)
+            pick(self.color_combo, self._color_default or "color")
+            self._color_user_set = False
         pick(self.media_combo, job.media)
         pick(self.orientation_combo, job.landscape)
         pick(self.nup_combo, job.number_up)
