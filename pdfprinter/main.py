@@ -27,6 +27,7 @@ def main() -> int:
 
     theme.load_fonts(app)
     theme.apply_palette(app)
+    app.setStyle(theme.AppStyle())
     app.setStyleSheet(theme.stylesheet())
 
     window = MainWindow(args.pdf)

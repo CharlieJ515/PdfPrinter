@@ -13,6 +13,7 @@ from string import Template
 from typing import Final
 
 from PyQt6.QtCore import QPointF, QRectF, QStandardPaths, Qt
+from PyQt6.QtWidgets import QProxyStyle, QStyle
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -606,6 +607,33 @@ def _i_single(p: QPainter, c: QColor) -> None:
     _poly(p, (7, 3.8), (14, 3.8), (17.4, 7.2), (17.4, 20.2), (7, 20.2), close=True)
 
 
+def _i_folder(p: QPainter, c: QColor) -> None:
+    _poly(
+        p,
+        (3.2, 19.4), (3.2, 5.4), (9.2, 5.4), (11.4, 8.2),
+        (20.8, 8.2), (20.8, 19.4),
+        close=True,
+    )
+
+
+def _i_folder_plus(p: QPainter, c: QColor) -> None:
+    _i_folder(p, c)
+    _poly(p, (12, 11.2), (12, 16.8))
+    _poly(p, (9.2, 14), (14.8, 14))
+
+
+def _i_list(p: QPainter, c: QColor) -> None:
+    for y in (6.5, 12.0, 17.5):
+        _poly(p, (8.5, y), (20.5, y))
+        _dot(p, 4.6, y, 1.1, c)
+
+
+def _i_grid(p: QPainter, c: QColor) -> None:
+    for x in (4.0, 13.2):
+        for y in (4.0, 13.2):
+            p.drawRoundedRect(QRectF(x, y, 6.8, 6.8), 1.2, 1.2)
+
+
 _PAINTERS: Final[dict] = {
     "open": _i_open,
     "zotero": _i_zotero,
@@ -635,7 +663,57 @@ _PAINTERS: Final[dict] = {
     "portrait": _i_portrait,
     "landscape": _i_landscape,
     "single": _i_single,
+    "folder": _i_folder,
+    "folder-plus": _i_folder_plus,
+    "list": _i_list,
+    "grid": _i_grid,
 }
+
+
+
+
+# --------------------------------------------------------------------------
+# standard-icon proxy style
+# --------------------------------------------------------------------------
+
+
+class AppStyle(QProxyStyle):
+    """Feed Qt's standard icons from the theme's glyph set.
+
+    Qt's fallback dialogs (e.g. the widget QFileDialog) take their
+    toolbar icons from the system icon theme; on systems without one
+    the buttons render blank. This proxy answers those requests with
+    theme glyphs so every dialog stays legible and on-palette.
+    """
+
+    _MAP = {
+        QStyle.StandardPixmap.SP_ArrowBack: "chevron-left",
+        QStyle.StandardPixmap.SP_ArrowForward: "chevron-right",
+        QStyle.StandardPixmap.SP_ArrowLeft: "chevron-left",
+        QStyle.StandardPixmap.SP_ArrowRight: "chevron-right",
+        QStyle.StandardPixmap.SP_ArrowUp: "chevron-up",
+        QStyle.StandardPixmap.SP_ArrowDown: "chevron-down",
+        QStyle.StandardPixmap.SP_FileDialogToParent: "chevron-up",
+        QStyle.StandardPixmap.SP_FileDialogNewFolder: "folder-plus",
+        QStyle.StandardPixmap.SP_FileDialogListView: "list",
+        QStyle.StandardPixmap.SP_FileDialogDetailedView: "grid",
+        QStyle.StandardPixmap.SP_FileDialogBack: "chevron-left",
+        QStyle.StandardPixmap.SP_DirIcon: "folder",
+        QStyle.StandardPixmap.SP_DirOpenIcon: "open",
+        QStyle.StandardPixmap.SP_DirClosedIcon: "folder",
+        QStyle.StandardPixmap.SP_FileIcon: "doc",
+        QStyle.StandardPixmap.SP_BrowserReload: "refresh",
+        QStyle.StandardPixmap.SP_DialogCloseButton: "close",
+        QStyle.StandardPixmap.SP_MessageBoxWarning: "warning",
+        QStyle.StandardPixmap.SP_MessageBoxInformation: "info",
+        QStyle.StandardPixmap.SP_MessageBoxCritical: "alert",
+    }
+
+    def standardIcon(self, sp, option=None, widget=None):  # noqa: N802
+        name = self._MAP.get(sp)
+        if name is not None:
+            return icon(name, INK, 16)
+        return super().standardIcon(sp, option, widget)
 
 
 # --------------------------------------------------------------------------
@@ -981,6 +1059,11 @@ QToolButton#sectionHeader:focus {
     background-color: rgba(182, 130, 53, 0.12);
     border: none;
     padding: 3px 4px 3px 0px;
+}
+QFileDialog QToolButton {
+    padding: 0px;
+    min-height: 24px;
+    min-width: 24px;
 }
 QToolButton#chipClose {
     background: transparent;
