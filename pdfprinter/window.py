@@ -1753,6 +1753,9 @@ class MainWindow(QMainWindow):
         self.placement_combo.currentIndexChanged.connect(self._on_placement_changed)
         self.mirror_check.toggled.connect(self._preview_timer.start)
         self.mirror_check.toggled.connect(self._update_placement_diagram)
+        self.placement_combo.currentIndexChanged.connect(
+            self._on_placement_changed
+        )
         self.hole_check.toggled.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._preview_timer.start)
         self.scale_spin.valueChanged.connect(self._update_more_button)
@@ -1966,6 +1969,13 @@ class MainWindow(QMainWindow):
             spin.setEnabled(not hole)
         self._update_placement_diagram()
 
+    def _on_placement_changed(self) -> None:
+        # punch placements turn the guide on as a starting point; the
+        # checkbox stays independent so it can be switched off again
+        mode = self.placement_combo.currentData() or ""
+        if mode.startswith("hole"):
+            self.hole_check.setChecked(True)
+
     def _update_placement_diagram(self) -> None:
         mode = self.placement_combo.currentData() or "fit"
         diagram_mode = "hole" if mode == "hole-content" else mode
@@ -2024,7 +2034,7 @@ class MainWindow(QMainWindow):
         )
         self.viewer.set_hole_guide(
             printing.HOLE_GUIDE_MM * printing.MM_TO_PT
-            if job.hole_guide or hole_mode
+            if job.hole_guide
             else None
         )
         self._update_legend(job)
@@ -2185,7 +2195,7 @@ class MainWindow(QMainWindow):
             )
         self.legend_margins.setVisible(show_margins)
 
-        show_punch = bool(job.hole_guide or hole_mode)
+        show_punch = bool(job.hole_guide)
         self.legend_punch_text.setText(
             f"Punch line {printing.HOLE_GUIDE_MM:g} mm"
         )
