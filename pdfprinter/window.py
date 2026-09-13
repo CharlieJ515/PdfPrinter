@@ -1357,7 +1357,8 @@ class MainWindow(QMainWindow):
             # worker finishes. The dirty re-run reaches the branch below.
             self._preview_dirty = True
             return
-        if not options and not has_margins:
+        needs_fit = printing.needs_paper_fit(self.current_path, job)
+        if not options and not has_margins and not needs_fit:
             if self._showing_transformed:
                 self._load_preserving_view(self.current_path)
                 self._showing_transformed = False
@@ -1379,9 +1380,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Rendering preview…")
         self._set_rendering(True)
         worker = _TransformWorker(task, self)
+        label = options or ("margins" if has_margins else "fitted to paper")
         worker.done.connect(
             lambda result, error: self._on_preview_done(
-                worker, source, options, result, error
+                worker, source, label, result, error
             )
         )
         self._preview_worker = worker
@@ -1391,7 +1393,7 @@ class MainWindow(QMainWindow):
         self,
         worker: _TransformWorker,
         source: str,
-        options: str,
+        label: str,
         result: str | None,
         error: str | None,
     ) -> None:
@@ -1420,7 +1422,6 @@ class MainWindow(QMainWindow):
             return
         self._load_preserving_view(result)
         self._showing_transformed = True
-        label = options if options else "margins"
         self.statusBar().showMessage(f"Preview: as printed ({label})", 5000)
         # the page count only settles once the load event has run
         QTimer.singleShot(0, self._update_header)

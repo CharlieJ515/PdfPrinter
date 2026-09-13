@@ -149,7 +149,10 @@ printer's own default is grayscale).</li>
 per sheet, scaling, collate, reverse order…). When collapsed, the button
 shows how many of them are set, e.g. <i>(2 set)</i>.</li>
 {_LI}<b>Scaling</b> — Automatic/Fit/Fill/No scaling are CUPS modes;
-<b>Custom</b> enables the percentage spinner.</li>
+<b>Custom</b> enables the percentage spinner. Documents whose pages do
+not match the paper (untrimmed journal press sheets, Letter files on an
+A4 printer) are fitted to the paper locally, so the preview shows the
+result and CUPS is told not to rescale the job again.</li>
 </ul>
 
 {_section("Margins &amp; placement")}

@@ -563,6 +563,309 @@ def make_page_subset(src: str, page_range: str, dest: str) -> None:
         raise PrintError(out.stderr.strip() or "qpdf failed")
 
 
+_normalized_cache: dict[tuple[str, float], str] = {}
+_normalized_dir: tempfile.TemporaryDirectory | None = None
+
+
+def normalize_page_boxes(src: str) -> str:
+    """Make the printable page equal the visible page.
+
+    Some journal PDFs are untrimmed press sheets: a large MediaBox with
+    a CropBox marking the actual page. Viewers render the CropBox, but
+    the transform pipeline and CUPS act on the MediaBox — the printer
+    then auto-scales the oversized sheet and the output no longer
+    matches the preview. When any page's boxes differ, this rewrites
+    the file with MediaBox = CropBox (content untouched); otherwise the
+    original path is returned. Cached per file mtime.
+    """
+    global _normalized_dir
+    try:
+        key = _file_key(src)
+    except OSError:
+        return src
+    cached = _normalized_cache.get(key)
+    if cached is not None:
+        return cached if cached else src
+    result = _normalize_with_pikepdf(src)
+    if result is None:  # pikepdf unavailable: gs honours the CropBox
+        result = _normalize_with_gs(src)
+    _normalized_cache[key] = result or ""
+    return result or src
+
+
+def _normalize_dest(src: str) -> str:
+    global _normalized_dir
+    if _normalized_dir is None:
+        _normalized_dir = tempfile.TemporaryDirectory(
+            prefix="pdfprinter-boxes-"
+        )
+    return os.path.join(
+        _normalized_dir.name, f"{abs(hash(_file_key(src)))}.pdf"
+    )
+
+
+def _normalize_with_pikepdf(src: str) -> str | None:
+    try:
+        import pikepdf
+    except ImportError:
+        return None
+    try:
+        with pikepdf.open(src) as pdf:
+            differs = False
+            for page in pdf.pages:
+                media = [round(float(v), 2) for v in page.mediabox]
+                crop = [
+                    round(float(v), 2)
+                    for v in page.get("/CropBox", page.mediabox)
+                ]
+                if media != crop:
+                    differs = True
+                    break
+            if not differs:
+                return src
+            for page in pdf.pages:
+                crop = page.get("/CropBox")
+                if crop is None:
+                    continue
+                # clip to the crop: press-sheet junk outside it (slug
+                # lines, crop marks) must never paint into the strips a
+                # later impose/margin step exposes — viewers don't show it
+                x0, y0, x1, y1 = (float(v) for v in crop)
+                page.contents_add(
+                    pikepdf.Stream(
+                        pdf,
+                        f"q {x0:.3f} {y0:.3f} {x1 - x0:.3f} "
+                        f"{y1 - y0:.3f} re W n\n".encode(),
+                    ),
+                    prepend=True,
+                )
+                page.contents_add(pikepdf.Stream(pdf, b"\nQ"), prepend=False)
+                page.mediabox = crop
+                for box in ("/CropBox", "/TrimBox", "/BleedBox", "/ArtBox"):
+                    if box in page:
+                        del page[box]
+            dest = _normalize_dest(src)
+            pdf.save(dest)
+            return dest
+    except Exception:  # noqa: BLE001 — treat unreadable input as-is
+        return src
+
+
+def _normalize_with_gs(src: str) -> str | None:
+    if shutil.which("gs") is None:
+        return src
+    dest = _normalize_dest(src)
+    try:
+        out = subprocess.run(
+            ["gs", "-q", "-dBATCH", "-dNOPAUSE", "-dSAFER", "-dUseCropBox",
+             "-sDEVICE=pdfwrite", "-o", dest, "-f", src],
+            capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return src
+    return dest if out.returncode == 0 and os.path.exists(dest) else src
+
+
+_MEDIA_PTS = {
+    "a3": (841.89, 1190.55),
+    "a4": (595.28, 841.89),
+    "a5": (419.53, 595.28),
+    "a6": (297.64, 419.53),
+    "letter": (612.0, 792.0),
+    "legal": (612.0, 1008.0),
+    "executive": (522.0, 756.0),
+    "tabloid": (792.0, 1224.0),
+    "ledger": (1224.0, 792.0),
+    "statement": (396.0, 612.0),
+    "folio": (612.0, 936.0),
+    "b5": (498.9, 708.66),
+    "b4": (708.66, 1000.63),
+}
+
+_media_default_cache: dict[str, tuple[float, float] | None] = {}
+
+
+def media_size_pt(name: str) -> tuple[float, float] | None:
+    """Width/height in points for a PPD or IPP media name, else None.
+
+    Handles plain PPD names ("A4", "Letter", "A4.Borderless"),
+    self-describing IPP names ("iso_a4_210x297mm", "na_letter_8.5x11in"),
+    and PPD custom sizes ("Custom.WIDTHxHEIGHT", points unless suffixed).
+    """
+    if not name:
+        return None
+    n = name.strip().lower()
+    if n.startswith("custom."):
+        m = re.fullmatch(
+            r"custom\.(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(mm|in)?", n
+        )
+        if not m:
+            return None
+        w, h = float(m.group(1)), float(m.group(2))
+        unit = {"mm": MM_TO_PT, "in": 72.0}.get(m.group(3) or "", 1.0)
+        return (w * unit, h * unit)
+    m = re.search(r"_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(mm|in)$", n)
+    if m:
+        unit = MM_TO_PT if m.group(3) == "mm" else 72.0
+        return (float(m.group(1)) * unit, float(m.group(2)) * unit)
+    base = n.split(".", 1)[0]
+    for token in (base, *base.split("_")):
+        if token in _MEDIA_PTS:
+            return _MEDIA_PTS[token]
+    return None
+
+
+def resolve_media_size(job: PrintJob) -> tuple[float, float] | None:
+    """The paper size the job will land on, in points.
+
+    The job's own media choice if set, else the printer driver's
+    default page size (cached per printer). None when neither can be
+    resolved — the pipeline then leaves page sizes alone, as before.
+    """
+    if job.media:
+        size = media_size_pt(job.media)
+        if size is not None:
+            return size
+    if not job.printer:
+        return None
+    if job.printer not in _media_default_cache:
+        size = None
+        try:
+            from . import cups
+
+            options = cups.printer_options(job.printer)
+            option = cups.find_option(options, "pagesize", "media")
+            if option is not None and option.default:
+                size = media_size_pt(option.default)
+        except Exception:  # noqa: BLE001 — unreachable printer: no impose
+            size = None
+        _media_default_cache[job.printer] = size
+    return _media_default_cache[job.printer]
+
+
+def _impose_scale(scaling: str, fit_w: float, fit_h: float) -> float:
+    fit = min(fit_w, fit_h)
+    if scaling == "none":
+        return 1.0
+    if scaling == "fit":
+        return fit
+    # "auto" / printer default: shrink oversized pages, never enlarge
+    return min(1.0, fit)
+
+
+_paperfit_cache: dict[tuple, bool] = {}
+
+
+def needs_paper_fit(src: str, job: PrintJob) -> bool:
+    """Whether the document itself changes on its way to the paper.
+
+    True when crop-box normalization would rewrite the file or when
+    page sizes differ from the paper the job resolves to — the preview
+    must then run the pipeline even with every option at its default,
+    or it would show the untransformed document while the print is
+    imposed. Cached per file and paper size.
+    """
+    try:
+        if normalize_page_boxes(src) != src:
+            return True
+        size = resolve_media_size(job)
+        if size is None:
+            return False
+        key = (_file_key(src), size)
+        if key not in _paperfit_cache:
+            _paperfit_cache[key] = _pages_off_media(src, size)
+        return _paperfit_cache[key]
+    except OSError:
+        return False
+
+
+def _pages_off_media(path: str, size: tuple[float, float]) -> bool:
+    try:
+        import pikepdf
+    except ImportError:
+        return False
+    media_w, media_h = size
+    try:
+        with pikepdf.open(path) as pdf:
+            for page in pdf.pages:
+                box = [float(v) for v in page.mediabox]
+                rotate = int(page.get("/Rotate", 0)) % 360
+                canvas_w, canvas_h = (
+                    (media_h, media_w) if rotate in (90, 270)
+                    else (media_w, media_h)
+                )
+                if (
+                    abs(box[2] - box[0] - canvas_w) > 1.0
+                    or abs(box[3] - box[1] - canvas_h) > 1.0
+                    or abs(box[0]) > 0.5
+                    or abs(box[1]) > 0.5
+                ):
+                    return True
+    except Exception:  # noqa: BLE001 — unreadable input: nothing to fit
+        return False
+    return False
+
+
+def impose_media(
+    src: str, dest: str, size: tuple[float, float], scaling: str
+) -> bool:
+    """Place every page onto a paper-sized canvas, once, locally.
+
+    This is the fitting CUPS would otherwise do server-side (invisible
+    to the preview): pages are scaled per the job's scaling mode,
+    auto-rotated when their orientation mismatches the paper, and
+    centered. Afterwards page size == paper size exactly, so the
+    server's own scaling pass has nothing left to do — the submit adds
+    print-scaling=none to pin that down. Returns False without writing
+    when every page already matches the paper.
+    """
+    try:
+        import pikepdf
+    except ImportError:
+        return False
+    media_w, media_h = size
+
+    def canvas_for(page) -> tuple[float, float]:
+        # a pre-rotated page displays with swapped dimensions; give it
+        # a swapped canvas so the displayed result is paper-sized
+        rotate = int(page.get("/Rotate", 0)) % 360
+        if rotate in (90, 270):
+            return (media_h, media_w)
+        return (media_w, media_h)
+
+    if not _pages_off_media(src, size):
+        return False
+    with pikepdf.open(src) as pdf:
+        for page in pdf.pages:
+            box = [float(v) for v in page.mediabox]
+            page_w, page_h = box[2] - box[0], box[3] - box[1]
+            if page_w <= 0 or page_h <= 0:
+                continue
+            canvas_w, canvas_h = canvas_for(page)
+            rotate = int(page.get("/Rotate", 0)) % 360
+            if rotate == 0 and (page_w > page_h) != (canvas_w > canvas_h):
+                # rotate the content 90° to match the paper orientation
+                s = _impose_scale(scaling, canvas_w / page_h, canvas_h / page_w)
+                tx = canvas_w / 2 + s * (box[1] + box[3]) / 2
+                ty = canvas_h / 2 - s * (box[0] + box[2]) / 2
+                matrix = f"q 0 {s:.5f} -{s:.5f} 0 {tx:.3f} {ty:.3f} cm\n"
+            else:
+                s = _impose_scale(scaling, canvas_w / page_w, canvas_h / page_h)
+                tx = (canvas_w - page_w * s) / 2 - s * box[0]
+                ty = (canvas_h - page_h * s) / 2 - s * box[1]
+                matrix = f"q {s:.5f} 0 0 {s:.5f} {tx:.3f} {ty:.3f} cm\n"
+            page.contents_add(
+                pikepdf.Stream(pdf, matrix.encode()), prepend=True
+            )
+            page.contents_add(pikepdf.Stream(pdf, b"\nQ"), prepend=False)
+            page.mediabox = pikepdf.Array([0, 0, canvas_w, canvas_h])
+            for key in ("/CropBox", "/TrimBox", "/BleedBox", "/ArtBox"):
+                if key in page:
+                    del page[key]
+        pdf.save(dest)
+    return True
+
+
 def build_output(
     src: str, job: PrintJob, workdir: str, *, qpdf_fallback: bool = True
 ) -> tuple[str, bool]:
@@ -578,7 +881,7 @@ def build_output(
     margin. Preview and print share this function so they can never
     diverge; the print path wraps it in its own sanitize/guard passes.
     """
-    work = src
+    work = normalize_page_boxes(src)
     layout_applied = False
     options = layout_options(job)
     if options:
@@ -596,6 +899,11 @@ def build_output(
             # no pdftopdf: at least apply the page selection locally
             make_page_subset(work, job.page_range, layout_path)
             work = layout_path
+    size = resolve_media_size(job)
+    if size is not None:
+        imposed_path = os.path.join(workdir, "imposed.pdf")
+        if impose_media(work, imposed_path, size, job.scaling):
+            work = imposed_path
     if needs_gs_pass(job):
         margined_path = os.path.join(workdir, "margined.pdf")
         apply_margins(work, margined_path, job)
@@ -639,6 +947,13 @@ def print_file(path: str, job: PrintJob) -> str:
                 # no local pdftopdf: fall back to server-side options
                 for option in layout_options(job):
                     cmd += ["-o", option]
+            if (
+                (layout_applied or not layout_options(job))
+                and resolve_media_size(job) is not None
+            ):
+                # pages were imposed to the paper size locally; forbid
+                # the server from rescaling behind the preview's back
+                cmd += ["-o", "print-scaling=none"]
             # final guard: CUPS runs pdftopdf server-side on every job;
             # if it would fail on our file, the printer receives broken
             # data and errors out (e.g. Canon #853) — check locally and
