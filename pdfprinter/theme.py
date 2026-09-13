@@ -961,7 +961,10 @@ QCheckBox::indicator:hover, QRadioButton::indicator:hover {
     background-color: $accent_tint;
 }
 QCheckBox::indicator:focus, QRadioButton::indicator:focus {
-    border: 2px solid $accent;
+    /* same geometry as the checked state: accent border and tint,
+       no thickening — focus just looks 'primed', minus the check */
+    border: 1px solid $accent;
+    background-color: $accent_tint;
 }
 QCheckBox::indicator:checked {
     border: 1px solid $accent;
