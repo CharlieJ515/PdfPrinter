@@ -1185,6 +1185,10 @@ class MainWindow(QMainWindow):
         self._build_margins_section(side_layout)
         side_layout.addStretch(1)
 
+        # pin the content width: when the vertical scrollbar appears it
+        # then eats the reserved SCROLLBAR_ROOM gutter instead of
+        # reflowing every control
+        side.setFixedWidth(theme.SIDEBAR_WIDTH - 1)  # -1: column border
         scroll = QScrollArea()
         scroll.setWidget(side)
         scroll.setWidgetResizable(True)
