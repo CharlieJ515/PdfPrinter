@@ -76,6 +76,10 @@ CONTROL_HEIGHT: Final = 30
 PRINT_BUTTON_HEIGHT: Final = 44
 RADIUS: Final = 4
 SIDEBAR_WIDTH: Final = 372
+SIDEBAR_LABEL_WIDTH: Final = 78  # the sidebar's label column
+SIDEBAR_PAD: Final = 16  # sidebar gutter (PAD_SECTION minus scrollbar room)
+ICON_BUTTON_SIZE: Final = 30  # square icon-only buttons
+SCROLLBAR_ROOM: Final = 8  # width of the always-on sidebar scrollbar
 
 # --------------------------------------------------------------------------
 # fonts
@@ -988,6 +992,28 @@ QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
 }
 QCheckBox::indicator:checked:disabled {
     image: $img_check_disabled;
+}
+
+/* accent-outlined primary dialog button */
+QPushButton#accentButton {
+    background-color: $control_fill;
+    border: 1px solid $accent;
+    border-radius: ${radius}px;
+    color: $accent_text;
+    min-height: 28px;
+    padding: 0px 16px;
+}
+QPushButton#accentButton:hover { background-color: $accent_tint; }
+QPushButton#accentButton:pressed { background-color: $accent_tint_deep; }
+QPushButton#accentButton:focus {
+    border: 2px solid $accent;
+    background-color: $accent_tint;
+    padding: 0px 15px;
+}
+QPushButton#accentButton:disabled {
+    background-color: $disabled_fill;
+    border: 1px solid $hairline_soft;
+    color: $text_disabled;
 }
 
 /* -------------------------------------------------- primary print button */

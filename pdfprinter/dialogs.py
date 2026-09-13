@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
 
 from . import __version__, theme, zotero
 from .help import HELP_HTML
+from .widgets import ElidedLabel
 
 HOMEPAGE = "https://github.com/CharlieJ515/PdfPrinter"
 
@@ -66,38 +67,12 @@ def _rule(horizontal: bool = True) -> QFrame:
     return line
 
 
-_ACCENT_BUTTON_QSS = f"""
-QPushButton {{
-    background-color: {theme.CONTROL_FILL};
-    border: 1px solid {theme.ACCENT};
-    border-radius: {theme.RADIUS}px;
-    color: {theme.ACCENT_TEXT};
-    min-height: 28px;
-    padding: 0px 16px;
-}}
-QPushButton:hover {{
-    background-color: {theme.ACCENT_TINT};
-}}
-QPushButton:pressed {{
-    background-color: {theme.ACCENT_TINT_DEEP};
-}}
-QPushButton:focus {{
-    border: 2px solid {theme.ACCENT};
-    background-color: {theme.ACCENT_TINT};
-    padding: 0px 15px;
-}}
-QPushButton:disabled {{
-    background-color: {theme.DISABLED_FILL};
-    border: 1px solid {theme.HAIRLINE_SOFT};
-    color: {theme.TEXT_DISABLED};
-}}
-"""
 
 
 def _accent_button(text: str, icon_name: str | None = None) -> QPushButton:
     """The accent-outlined primary button of the artboards."""
     button = QPushButton()
-    button.setStyleSheet(_ACCENT_BUTTON_QSS)
+    button.setObjectName("accentButton")  # styled by the app QSS
     button.setFont(theme.body_font())
     button.setMinimumHeight(theme.CONTROL_HEIGHT)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -119,61 +94,6 @@ def _plain_button(text: str) -> QPushButton:
     return button
 
 
-def _folder_pixmap(color: str, size: int = 14) -> QPixmap:
-    """A closed folder, drawn in the same key as :func:`theme.pixmap`.
-
-    ``theme`` has no folder glyph and is owned by the design foundation,
-    so the collections tree draws its own in the identical idiom (24 unit
-    viewbox, 1.5 logical px stroke, round joins).
-    """
-    key = (color, size)
-    cached = _folder_pixmap._cache.get(key)  # type: ignore[attr-defined]
-    if cached is not None:
-        return cached
-    dpr = 2.0
-    pm = QPixmap(int(round(size * dpr)), int(round(size * dpr)))
-    pm.setDevicePixelRatio(dpr)
-    pm.fill(QColor(0, 0, 0, 0))
-    painter = QPainter(pm)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.scale(size / 24.0, size / 24.0)
-    pen = QPen(QColor(color))
-    pen.setWidthF(36.0 / max(size, 1))
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawPolygon(
-        *(
-            QPointF(x, y)
-            for x, y in (
-                (3.2, 19.4),
-                (3.2, 5.4),
-                (9.2, 5.4),
-                (11.4, 8.2),
-                (20.8, 8.2),
-                (20.8, 19.4),
-            )
-        )
-    )
-    painter.end()
-    _folder_pixmap._cache[key] = pm  # type: ignore[attr-defined]
-    return pm
-
-
-_folder_pixmap._cache = {}  # type: ignore[attr-defined]
-
-
-def _folder_icon(color: str, size: int = 14) -> QIcon:
-    key = (color, size)
-    cached = _folder_icon._cache.get(key)  # type: ignore[attr-defined]
-    if cached is None:
-        cached = QIcon(_folder_pixmap(color, size))
-        _folder_icon._cache[key] = cached  # type: ignore[attr-defined]
-    return cached
-
-
-_folder_icon._cache = {}  # type: ignore[attr-defined]
 
 
 class _AccentRowDelegate(QStyledItemDelegate):
@@ -206,37 +126,6 @@ class _AccentRowDelegate(QStyledItemDelegate):
             theme.qcolor(theme.ACCENT),
         )
         painter.restore()
-
-
-class _ElidedLabel(QLabel):
-    """Label that elides its text in the middle instead of clipping."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._full = ""
-        self.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-
-    def setFullText(self, text: str) -> None:  # noqa: N802 (Qt naming)
-        self._full = text
-        self.setToolTip(text)
-        self._sync()
-
-    def fullText(self) -> str:  # noqa: N802 (Qt naming)
-        return self._full
-
-    def _sync(self) -> None:
-        metrics = QFontMetrics(self.font())
-        super().setText(
-            metrics.elidedText(
-                self._full, Qt.TextElideMode.ElideMiddle, max(self.width(), 40)
-            )
-        )
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        super().resizeEvent(event)
-        self._sync()
 
 
 def _format_added(mtime: float) -> str:
@@ -492,7 +381,7 @@ class ZoteroPickerDialog(QDialog):
             count = self._counts.get(collection.id, 0)
             item = QTreeWidgetItem([collection.name, str(count)])
             item.setData(0, Qt.ItemDataRole.UserRole, collection.id)
-            item.setIcon(0, _folder_icon(theme.TEXT_MUTED, 14))
+            item.setIcon(0, theme.icon("folder", theme.TEXT_MUTED, 14))
             self._style_count(item)
             parent_item.addChild(item)
             self._add_collection_items(item, collection.id)
@@ -546,7 +435,7 @@ class ZoteroPickerDialog(QDialog):
         self._path_icon = QLabel()
         self._path_icon.setPixmap(theme.pixmap("doc", theme.TEXT_FAINT, 14))
         self._path_icon.setFixedWidth(16)
-        self._path_label = _ElidedLabel()
+        self._path_label = ElidedLabel()
         self._path_label.setObjectName("metaLabel")
         self._path_label.setFont(theme.body_font(theme.SMALL_POINT_SIZE))
         path_layout.addWidget(self._path_icon, 0, Qt.AlignmentFlag.AlignVCenter)

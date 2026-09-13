@@ -61,7 +61,6 @@ from . import printing, theme, zotero
 from .controls import (
     SuffixSpinBox,
     _Chip,
-    _ElidedLabel,
     _TransformWorker,
     _abbrev_dir,
     _guide_sample,
@@ -78,6 +77,7 @@ from .dialogs import (
     show_print_error,
 )
 from .widgets import (
+    ElidedLabel,
     CollapsibleSection,
     JobChip,
     PlacementDiagram,
@@ -169,10 +169,6 @@ EMPTY_BODY = (
 EMPTY_HINT = "…or drop a file anywhere in this window"
 
 
-LABEL_WIDTH = 78  # the sidebar's label column
-SIDE_PAD = 16  # sidebar gutter (PAD_SECTION minus room for the scrollbar)
-ICON_BUTTON = 30  # square icon-only buttons, CONTROL_HEIGHT tall
-SCROLLBAR_ROOM = 8  # width of the always-on sidebar scrollbar
 
 
 # --------------------------------------------------------------------------
@@ -257,7 +253,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _icon_button(
-        name: str, tooltip: str, size: int = ICON_BUTTON
+        name: str, tooltip: str, size: int = theme.ICON_BUTTON_SIZE
     ) -> QPushButton:
         button = QPushButton()
         button.setIcon(theme.icon(name, theme.INK, 15))
@@ -269,7 +265,7 @@ class MainWindow(QMainWindow):
         return button
 
     def _row(
-        self, text: str, *widgets, label_width: int = LABEL_WIDTH
+        self, text: str, *widgets, label_width: int = theme.SIDEBAR_LABEL_WIDTH
     ) -> tuple[QHBoxLayout, QLabel]:
         """One ``Label   [control…]`` line of the sidebar."""
         row = QHBoxLayout()
@@ -336,9 +332,9 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(1)
-        self.header_name = _ElidedLabel("No document")
+        self.header_name = ElidedLabel("No document")
         self.header_name.setFont(theme.body_font())
-        self.header_meta = _ElidedLabel("", Qt.TextElideMode.ElideMiddle)
+        self.header_meta = ElidedLabel("", Qt.TextElideMode.ElideMiddle)
         self.header_meta.setObjectName("metaLabel")
         self.header_meta.setFont(theme.body_font(theme.SMALL_POINT_SIZE))
         column.addWidget(self.header_name)
@@ -588,7 +584,7 @@ class MainWindow(QMainWindow):
         side = QWidget()
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(
-            SIDE_PAD, theme.PAD_SECTION, SIDE_PAD, theme.PAD_SECTION
+            theme.SIDEBAR_PAD, theme.PAD_SECTION, theme.SIDEBAR_PAD, theme.PAD_SECTION
         )
         side_layout.setSpacing(theme.GAP_CONTROL)
 
@@ -668,7 +664,7 @@ class MainWindow(QMainWindow):
         minus.setProperty("edge", "first")
         minus.setIcon(theme.icon("zoom-out", theme.INK, 13))
         minus.setIconSize(QSize(13, 13))
-        minus.setFixedSize(ICON_BUTTON, theme.CONTROL_HEIGHT)
+        minus.setFixedSize(theme.ICON_BUTTON_SIZE, theme.CONTROL_HEIGHT)
         minus.setToolTip("One copy fewer")
         minus.clicked.connect(self.copies_spin.stepDown)
         plus = QPushButton()
@@ -676,7 +672,7 @@ class MainWindow(QMainWindow):
         plus.setProperty("edge", "last")
         plus.setIcon(theme.icon("zoom-in", theme.INK, 13))
         plus.setIconSize(QSize(13, 13))
-        plus.setFixedSize(ICON_BUTTON, theme.CONTROL_HEIGHT)
+        plus.setFixedSize(theme.ICON_BUTTON_SIZE, theme.CONTROL_HEIGHT)
         plus.setToolTip("One copy more")
         plus.clicked.connect(self.copies_spin.stepUp)
         stepper = QWidget()
@@ -686,7 +682,7 @@ class MainWindow(QMainWindow):
         stepper_layout.addWidget(minus)
         stepper_layout.addWidget(self.copies_spin)
         stepper_layout.addWidget(plus)
-        stepper.setFixedWidth(ICON_BUTTON * 2 + 60 - 2)
+        stepper.setFixedWidth(theme.ICON_BUTTON_SIZE * 2 + 60 - 2)
         row, _ = self._row("Copies", (stepper, 0), label_width=print_label_w)
         row.addStretch(1)
         side_layout.addLayout(row)
@@ -870,7 +866,7 @@ class MainWindow(QMainWindow):
         for check in (self.collate_check, self.reverse_check):
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
-            row.addSpacing(LABEL_WIDTH + theme.GAP_CONTROL)
+            row.addSpacing(theme.SIDEBAR_LABEL_WIDTH + theme.GAP_CONTROL)
             row.addWidget(check, 1)
             form.addLayout(row)
 
@@ -983,7 +979,7 @@ class MainWindow(QMainWindow):
         footer = QWidget()
         layout = QVBoxLayout(footer)
         layout.setContentsMargins(
-            SIDE_PAD, 14, SIDE_PAD + SCROLLBAR_ROOM, theme.PAD_SECTION
+            theme.SIDEBAR_PAD, 14, theme.SIDEBAR_PAD + theme.SCROLLBAR_ROOM, theme.PAD_SECTION
         )
         layout.setSpacing(theme.GAP_CONTROL + 3)
 

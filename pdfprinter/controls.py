@@ -85,44 +85,6 @@ def _solid_sample(
 
 
 
-class _ElidedLabel(QLabel):
-    """A QLabel that elides its text instead of forcing the layout wider."""
-
-    def __init__(
-        self,
-        text: str = "",
-        mode: Qt.TextElideMode = Qt.TextElideMode.ElideMiddle,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._full = text
-        self._mode = mode
-        self.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        self._sync()
-
-    def setFullText(self, text: str) -> None:  # noqa: N802 (Qt naming)
-        self._full = text
-        self.setToolTip(text)
-        self._sync()
-
-    def fullText(self) -> str:  # noqa: N802 (Qt naming)
-        return self._full
-
-    def _sync(self) -> None:
-        width = max(60, self.width())
-        super().setText(
-            QFontMetrics(self.font()).elidedText(self._full, self._mode, width)
-        )
-
-    def resizeEvent(self, event):  # noqa: N802 (Qt naming)
-        super().resizeEvent(event)
-        self._sync()
-
-
-
-
 class _Chip(QWidget):
     """A pill floating over the preview (binder mode / rendering)."""
 

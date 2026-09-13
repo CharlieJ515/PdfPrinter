@@ -31,6 +31,11 @@ PDFTOPDF = "/usr/lib/cups/filter/pdftopdf"
 _pdftopdf_args: list[str] | None = None
 
 
+def _file_key(path: str) -> tuple[str, float]:
+    """Cache key that invalidates when the file changes on disk."""
+    return (path, os.path.getmtime(path))
+
+
 def pdftopdf_available() -> bool:
     return os.access(PDFTOPDF, os.X_OK)
 
@@ -96,7 +101,7 @@ def content_ink_boxes(src: str) -> list[tuple[float, float, float, float]]:
     unavailable, and per page to the raw visible extents whenever the
     filtered box looks implausible.
     """
-    key = (src, os.path.getmtime(src))
+    key = _file_key(src)
     cached = _content_bbox_cache.get(key)
     if cached is not None:
         return cached
@@ -242,7 +247,7 @@ _bbox_cache: dict[tuple[str, float], list[tuple[float, float, float, float]]] = 
 
 def ink_boxes(src: str) -> list[tuple[float, float, float, float]]:
     """Per-page ink bounding boxes (x0, y0, x1, y1) via gs's bbox device."""
-    key = (src, os.path.getmtime(src))
+    key = _file_key(src)
     cached = _bbox_cache.get(key)
     if cached is not None:
         return cached
@@ -495,7 +500,7 @@ def _repaired_copy(src: str) -> str:
     document pay the repair cost once.
     """
     global _repair_dir
-    key = (src, os.path.getmtime(src))
+    key = _file_key(src)
     cached = _repair_cache.get(key)
     if cached and os.path.isfile(cached):
         return cached
