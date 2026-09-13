@@ -159,7 +159,7 @@ WHEEL_STEP_PX = 220  # scroll distance per mouse-wheel notch
 LABEL_WIDTH = 78  # the sidebar's label column
 SIDE_PAD = 16  # sidebar gutter (PAD_SECTION minus room for the scrollbar)
 ICON_BUTTON = 30  # square icon-only buttons, CONTROL_HEIGHT tall
-SCROLLBAR_ROOM = 10  # the overlay scrollbar must not sit on a control
+SCROLLBAR_ROOM = 8  # width of the always-on sidebar scrollbar
 
 
 # --------------------------------------------------------------------------
@@ -827,6 +827,11 @@ class SuffixSpinBox(QSpinBox):
         super().stepBy(steps)
         QTimer.singleShot(0, self._clamp_now)
 
+    def wheelEvent(self, event):  # noqa: N802 (Qt naming)
+        # these fields show no step arrows, so wheel-stepping would be
+        # an invisible affordance; let the wheel scroll the sidebar
+        event.ignore()
+
 
 class _TransformWorker(QThread):
     """Runs the preview transform pipeline off the GUI thread."""
@@ -1246,7 +1251,7 @@ class MainWindow(QMainWindow):
         side = QWidget()
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(
-            SIDE_PAD, theme.PAD_SECTION, SIDE_PAD + SCROLLBAR_ROOM, theme.PAD_SECTION
+            SIDE_PAD, theme.PAD_SECTION, SIDE_PAD, theme.PAD_SECTION
         )
         side_layout.setSpacing(theme.GAP_CONTROL)
 
@@ -1257,13 +1262,13 @@ class MainWindow(QMainWindow):
         self._build_margins_section(side_layout)
         side_layout.addStretch(1)
 
-        # pin the content width: when the vertical scrollbar appears it
-        # then eats the reserved SCROLLBAR_ROOM gutter instead of
-        # reflowing every control
-        side.setFixedWidth(theme.SIDEBAR_WIDTH - 1)  # -1: column border
         scroll = QScrollArea()
         scroll.setWidget(side)
         scroll.setWidgetResizable(True)
+        # the scrollbar is always reserved so the viewport width never
+        # changes: no control reflow when it appears, and the content
+        # always fits exactly (no sideways panning)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
