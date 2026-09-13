@@ -868,6 +868,7 @@ class MainWindow(QMainWindow):
         self._zotero_dialog: ZoteroPickerDialog | None = None
         self._preview_worker: _TransformWorker | None = None
         self._preview_dirty = False
+        self._printer_restored = False
         self._print_worker: _TransformWorker | None = None
         self._print_stage = "idle"
         self._color_default: str | None = None
@@ -979,6 +980,7 @@ class MainWindow(QMainWindow):
         self._update_placement_diagram()
         self._set_print_stage("idle")
         self.refresh_printers()
+        self._refresh_last_tooltip()
 
     # ----- header bar -----
 
@@ -1702,6 +1704,9 @@ class MainWindow(QMainWindow):
         self.printer_status.setObjectName("metaLabel")
         self.printer_status.setFont(theme.body_font(theme.SMALL_POINT_SIZE))
         bar.addPermanentWidget(self.printer_status)
+        pad = QWidget()  # breathing room between the text and the edge
+        pad.setFixedWidth(10)
+        bar.addPermanentWidget(pad)
 
     # ----- signals -----
 
@@ -2181,6 +2186,12 @@ class MainWindow(QMainWindow):
         default = printing.default_printer()
         if default and default in printers:
             self.printer_combo.setCurrentText(default)
+        if not self._printer_restored:
+            # on startup, come back to the printer of the last print
+            self._printer_restored = True
+            last = printing.load_last_job()
+            if last is not None and last.printer in printers:
+                self.printer_combo.setCurrentText(last.printer)
         self.printer_combo.blockSignals(False)
         self._update_capabilities()
         count = len(printers)
@@ -2473,6 +2484,67 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(0)
         self.statusBar().showMessage("Settings reset to defaults", 5000)
 
+    def _job_summary(self, job: printing.PrintJob) -> str:
+        """The printer plus only the settings that differ from defaults."""
+        lines = [job.printer or "(no printer)"]
+        duplex_names = {
+            "two-sided-long-edge": "Double-sided (long edge)",
+            "two-sided-short-edge": "Double-sided (short edge)",
+        }
+        placement_names = {
+            "shift": "Shift by margins",
+            "hole": "Center right of punch line",
+            "hole-clip": "Center on punch line (no shrink)",
+        }
+
+        def add(condition: bool, text: str) -> None:
+            if condition:
+                lines.append("\u2022 " + text)
+
+        add(job.copies != 1, f"Copies: {job.copies}")
+        add(bool(job.page_range), f"Pages: {job.page_range}")
+        add(job.duplex != "one-sided",
+            "Sides: " + duplex_names.get(job.duplex, job.duplex))
+        add(job.color_mode == "color", "Color: Color")
+        add(job.color_mode == "monochrome", "Color: Grayscale")
+        add(bool(job.media), f"Paper: {job.media}")
+        add(job.landscape, "Orientation: Landscape")
+        add(job.number_up > 1, f"Pages/sheet: {job.number_up}")
+        add(bool(job.number_up_layout), f"N-up order: {job.number_up_layout}")
+        add(job.collate, "Collate copies")
+        add(bool(job.page_set), f"Page set: {job.page_set} pages")
+        add(job.reverse, "Reverse order")
+        if job.scale_percent != 100:
+            add(True, f"Scale: {job.scale_percent} %")
+        elif job.scaling:
+            add(True, f"Scaling: {job.scaling}")
+        margins = [
+            (side, mm)
+            for side, mm in (
+                ("L", job.margin_left), ("R", job.margin_right),
+                ("T", job.margin_top), ("B", job.margin_bottom),
+            )
+            if mm > 0
+        ]
+        add(bool(margins),
+            "Margins: " + "  ".join(f"{s} {mm:g} mm" for s, mm in margins))
+        add(job.margin_mode in placement_names,
+            "Placement: " + placement_names.get(job.margin_mode, ""))
+        add(job.mirror_margins, "Mirror margins")
+        add(job.hole_guide, "Punch hole guide")
+        for keyword, choice in job.extra_options.items():
+            add(True, f"{keyword}: {choice}")
+        if len(lines) == 1:
+            lines.append("\u2022 all settings at defaults")
+        return "\n".join(lines)
+
+    def _refresh_last_tooltip(self) -> None:
+        job = printing.load_last_job()
+        if job is None:
+            self.last_button.setToolTip("No print has been made yet")
+        else:
+            self.last_button.setToolTip(self._job_summary(job))
+
     def _load_last_settings(self) -> None:
         job = printing.load_last_job()
         if job is None:
@@ -2480,7 +2552,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No saved print settings found", 5000)
             return
         self._apply_job_to_ui(job)
-        self.statusBar().showMessage("Loaded last print's settings", 5000)
+        if job.printer and self.printer_combo.currentText() != job.printer:
+            self.statusBar().showMessage(
+                "Loaded last print's settings \u2014 printer "
+                f"\u201c{job.printer}\u201d is not available, kept "
+                f"{self.printer_combo.currentText()}"
+            )
+        else:
+            self.statusBar().showMessage("Loaded last print's settings", 5000)
 
     def _apply_job_to_ui(self, job: printing.PrintJob) -> None:
         def pick(combo, value) -> None:
@@ -2493,6 +2572,7 @@ class MainWindow(QMainWindow):
             index = self.printer_combo.findText(job.printer)
             if index >= 0:
                 self.printer_combo.setCurrentIndex(index)
+
         self.copies_spin.setValue(job.copies)
         self.range_edit.setText(job.page_range)
         pick(self.duplex_combo, job.duplex)
@@ -2600,6 +2680,7 @@ class MainWindow(QMainWindow):
             return
         printing.save_last_job(job)
         self.last_button.setEnabled(True)
+        self._refresh_last_tooltip()
         self._set_print_stage("submitted")
         QTimer.singleShot(4000, self._clear_submitted)
         self._show_job_chip("printing", f"Job {job_id} · printing…")
