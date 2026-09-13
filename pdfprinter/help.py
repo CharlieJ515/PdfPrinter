@@ -134,6 +134,10 @@ only the selected pages.</li>
 {_LI}<b>Duplex</b> — greyed out on printers without a duplex unit; use
 <i>Page set</i> odd/even to print double-sided manually (print odd pages,
 re-feed the stack, print even pages).</li>
+{_LI}<b>Page set</b> odd/even refers to the document's own page numbers
+and intersects with <b>Pages</b>: {_CODE}2-5</span> + odd prints pages
+3 and 5. For a manual duplex of a range starting on an even page, print
+the even set first.</li>
 {_LI}Choices marked <b>(default)</b> are what the printer's driver
 reports as its default; selecting them sends nothing and lets the printer
 decide. Options a printer does not support are greyed out.
