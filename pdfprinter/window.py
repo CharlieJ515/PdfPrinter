@@ -331,8 +331,6 @@ class _GuideOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         margin_pen = theme.guide_pen(theme.MARGIN_GUIDE)
         hole_pen = theme.guide_pen(theme.PUNCH_GUIDE)
-        ring_pen = theme.guide_pen(theme.PUNCH_GUIDE)
-        ring_pen.setStyle(Qt.PenStyle.SolidLine)
         hw_brush = theme.qcolor(theme.UNPRINTABLE, theme.UNPRINTABLE_ALPHA)
         caption_color = theme.qcolor(theme.TEXT_FAINT)
         own_rect = QRectF(self.rect())
@@ -378,15 +376,6 @@ class _GuideOverlay(QWidget):
                 painter.drawLine(
                     QPointF(x, rect.top()), QPointF(x, rect.bottom())
                 )
-                # two hole rings so the line reads as "punch here"
-                painter.setPen(ring_pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                for fraction in (0.25, 0.75):
-                    painter.drawEllipse(
-                        QPointF(x, rect.top() + rect.height() * fraction),
-                        5.0,
-                        5.0,
-                    )
             if view._mirror_guides:
                 self._draw_caption(painter, rect, index, even, caption_color)
         painter.end()
