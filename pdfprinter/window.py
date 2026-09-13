@@ -1196,6 +1196,12 @@ class MainWindow(QMainWindow):
         self.render_chip.label.setText("Rendering preview…")
         self.render_chip.hide()
 
+        # bottom-right "current / total" page indicator
+        self.page_chip = _Chip(self.viewer)
+        self.page_chip._layout.addWidget(self.page_chip.label)
+        self.page_chip.label.setFont(theme.body_font(tabular=True))
+        self.page_chip.hide()
+
     def _build_legend(self) -> QWidget:
         bar = theme.styled_panel(QWidget(self))
         bar.setObjectName("legendBar")
@@ -1710,6 +1716,11 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self._caps_cache: dict[str, dict[str, printing.PPDOption]] = {}
         self.printer_combo.currentTextChanged.connect(self._update_capabilities)
+        self.viewer.verticalScrollBar().valueChanged.connect(
+            self._update_page_chip
+        )
+        self.viewer.zoom_changed.connect(self._update_page_chip)
+        self.document.statusChanged.connect(self._update_page_chip)
         self.color_combo.currentIndexChanged.connect(self._apply_color_preview)
 
         # debounce option changes before re-running the preview transform
@@ -1844,6 +1855,35 @@ class MainWindow(QMainWindow):
             x = max(16, width - chip.width() - 16) if right else 16
             chip.move(x, 14)
             chip.raise_()
+        self.page_chip.adjustSize()
+        self.page_chip.move(
+            max(16, width - self.page_chip.width() - 16),
+            max(0, height - self.page_chip.height() - 18),
+        )
+        self.page_chip.raise_()
+
+    def _update_page_chip(self, *_args) -> None:
+        chip = getattr(self, "page_chip", None)
+        if chip is None:
+            return
+        total = self.document.pageCount()
+        if total <= 0:
+            chip.hide()
+            return
+        layout = self.viewer._page_layout()
+        center_y = self.viewer.viewport().height() / 2
+        current = 1
+        for index, (rect, _scale) in enumerate(layout):
+            if rect.top() <= center_y:
+                current = index + 1
+            else:
+                break
+        text = f"{current} / {total}"
+        if chip.label.text() != text or not chip.isVisible():
+            chip.label.setText(text)
+            chip.adjustSize()
+            chip.show()
+            self._layout_overlays()
 
     def _layout_print_spinner(self) -> None:
         button = getattr(self, "print_button", None)
