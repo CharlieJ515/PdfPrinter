@@ -861,14 +861,16 @@ class MainWindow(QMainWindow):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         return button
 
-    def _row(self, text: str, *widgets) -> tuple[QHBoxLayout, QLabel]:
+    def _row(
+        self, text: str, *widgets, label_width: int = LABEL_WIDTH
+    ) -> tuple[QHBoxLayout, QLabel]:
         """One ``Label   [control…]`` line of the sidebar."""
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(theme.GAP_CONTROL)
         label = QLabel(text)
         label.setFont(theme.body_font())
-        label.setFixedWidth(LABEL_WIDTH)
+        label.setFixedWidth(label_width)
         row.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
         for widget, stretch in widgets:
             row.addWidget(widget, stretch, Qt.AlignmentFlag.AlignVCenter)
@@ -1212,11 +1214,24 @@ class MainWindow(QMainWindow):
     def _build_print_section(self, side_layout: QVBoxLayout) -> None:
         side_layout.addWidget(self._section_header("PRINT", rule=False))
 
+        # this section's labels are all short; a column sized for the
+        # longest of them keeps the controls close instead of inheriting
+        # the wider column the other sections need
+        metrics = QFontMetrics(theme.body_font())
+        print_label_w = (
+            max(
+                metrics.horizontalAdvance(t)
+                for t in ("Printer", "Copies", "Pages", "Sides", "Color")
+            )
+            + 4
+        )
+
         self.printer_combo = self._combo("The CUPS queue the job goes to", 8)
         refresh_button = self._icon_button("refresh", "Refresh the printer list")
         refresh_button.clicked.connect(self.refresh_printers)
         row, _ = self._row(
-            "Printer", (self.printer_combo, 1), (refresh_button, 0)
+            "Printer", (self.printer_combo, 1), (refresh_button, 0),
+            label_width=print_label_w,
         )
         side_layout.addLayout(row)
 
@@ -1254,7 +1269,7 @@ class MainWindow(QMainWindow):
         stepper_layout.addWidget(self.copies_spin)
         stepper_layout.addWidget(plus)
         stepper.setFixedWidth(ICON_BUTTON * 2 + 60 - 2)
-        row, _ = self._row("Copies", (stepper, 0))
+        row, _ = self._row("Copies", (stepper, 0), label_width=print_label_w)
         row.addStretch(1)
         side_layout.addLayout(row)
 
@@ -1265,7 +1280,7 @@ class MainWindow(QMainWindow):
         self.range_edit.setPlaceholderText("All pages")
         self.range_edit.setMinimumHeight(theme.CONTROL_HEIGHT)
         self.range_edit.setFont(theme.body_font(tabular=True))
-        row, _ = self._row("Pages", (self.range_edit, 1))
+        row, _ = self._row("Pages", (self.range_edit, 1), label_width=print_label_w)
         side_layout.addLayout(row)
 
         self.range_hint = theme.style_hint(QLabel(RANGE_HINT))
@@ -1288,7 +1303,7 @@ class MainWindow(QMainWindow):
         hint_holder = QHBoxLayout()
         hint_holder.setContentsMargins(0, 0, 0, 0)
         hint_holder.setSpacing(0)
-        hint_holder.addSpacing(LABEL_WIDTH + theme.GAP_CONTROL)
+        hint_holder.addSpacing(print_label_w + theme.GAP_CONTROL)
         hint_holder.addWidget(self.range_hint, 1)
         hint_holder.addWidget(self.range_error, 1)
         side_layout.addLayout(hint_holder)
@@ -1309,7 +1324,8 @@ class MainWindow(QMainWindow):
         self.duplex_info.setFixedWidth(15)
         self.duplex_info.setVisible(False)
         row, self.duplex_label = self._row(
-            "Sides", (self.duplex_combo, 1), (self.duplex_info, 0)
+            "Sides", (self.duplex_combo, 1), (self.duplex_info, 0),
+            label_width=print_label_w,
         )
         side_layout.addLayout(row)
 
@@ -1322,7 +1338,7 @@ class MainWindow(QMainWindow):
         self.color_combo.setToolTip(
             "Color or grayscale output; grayscale is previewed too"
         )
-        row, _ = self._row("Color", (self.color_combo, 1))
+        row, _ = self._row("Color", (self.color_combo, 1), label_width=print_label_w)
         side_layout.addLayout(row)
 
     def _build_more_section(self, side_layout: QVBoxLayout) -> None:
